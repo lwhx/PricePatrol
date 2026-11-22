@@ -122,7 +122,8 @@ Dockerfile 先 `npm ci` 构建前端，运行阶段 `npm ci --omit=dev` 后调�
 服务器不必克隆仓库，只需要 `deploy/` 下的三个文件：
 
 ```bash
-# 从仓库取得部署文件（或直接复制这三个文件到服务器同一目录）
+# 在服务器上建一个部署目录，只取这两个文件（也可直接用 scp 拷贝）
+mkdir -p ~/pricepatrol && cd ~/pricepatrol
 curl -fsSLO https://raw.githubusercontent.com/lwhx/PricePatrol/main/deploy/compose.yaml
 curl -fsSL https://raw.githubusercontent.com/lwhx/PricePatrol/main/deploy/.env.example -o .env.example
 
@@ -135,7 +136,7 @@ docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
 
-已在同一目录放好 `compose.yaml` 时，`--env-file` 可省略。默认镜像为 `ghcr.io/lwhx/pricepatrol:latest`；建议改成已通过检查的 `sha-<完整提交SHA>` 固定版本，升级时改 `IMAGE` 再执行一次 `pull` 和 `up -d`。
+文件都在当前目录，`--env-file .env` 可省略（Compose 默认读取同目录 `.env`）。默认镜像为 `ghcr.io/lwhx/pricepatrol:latest`；建议改成已通过检查的 `sha-<完整提交SHA>` 固定版本，升级时改 `IMAGE` 再执行一次 `pull` 和 `up -d`。
 
 若镜像包为私有，先在本机登录：
 
