@@ -2,10 +2,10 @@ name: pricepatrol
 
 services:
   app:
-    image: ${IMAGE:-pricepatrol:local}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # 默认直接使用已发布的 AMD64/ARM64 镜像，不在服务器上构建。
+    # 如需本机构建，请参照 README 先执行 docker build，再覆盖 IMAGE。
+    image: ${IMAGE:-ghcr.io/lwhx/pricepatrol:latest}
+    pull_policy: always
     init: true
     restart: unless-stopped
     stop_grace_period: 30s
@@ -19,7 +19,7 @@ services:
       DATA_DIR: /app/data
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?请先在.env配置持久ENCRYPTION_KEY}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - pricepatrol-data:/app/data
     healthcheck:

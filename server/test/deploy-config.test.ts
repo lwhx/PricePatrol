@@ -8,7 +8,8 @@ const envExample = text('.env.example');
 const deployEnv = text('deploy/.env.example');
 
 it('keeps the published image and data volume named pricepatrol everywhere', () => {
-  expect(envExample).toContain('IMAGE=pricepatrol:local');
+  expect(envExample).toContain('IMAGE=ghcr.io/lwhx/pricepatrol:latest');
+  expect(envExample).not.toMatch(/^IMAGE=pricepatrol:local$/m);
   expect(envExample).toContain('DATA_VOLUME=pricepatrol-data');
   expect(deployEnv).toContain('IMAGE=ghcr.io/lwhx/pricepatrol:latest');
   expect(deployEnv).toContain('DATA_VOLUME=pricepatrol-data');
@@ -17,6 +18,9 @@ it('keeps the published image and data volume named pricepatrol everywhere', () 
     expect(file).toContain('pricepatrol-data:/app/data');
     expect(file).toContain('name: ${DATA_VOLUME:-pricepatrol-data}');
     expect(file).toContain('${ENCRYPTION_KEY:?');
+    expect(file).toContain('image: ${IMAGE:-ghcr.io/lwhx/pricepatrol:latest}');
+    expect(file).toContain('pull_policy: always');
+    expect(file).not.toMatch(/^\s+build:/m);
   }
 });
 

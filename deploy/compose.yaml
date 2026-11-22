@@ -20,6 +20,8 @@ services:
     # 公开镜像：ghcr.io/lwhx/pricepatrol:latest
     # 私有镜像需先 docker login ghcr.io
     image: ${IMAGE:-ghcr.io/lwhx/pricepatrol:latest}
+    # 每次启动时检查新镜像；如需固定版本，请在 .env 中设置 sha- 标签。
+    pull_policy: always
     # 部署文件在 deploy/ 下，镜像已包含前端与后端，因此不需要 build。
     init: true
     restart: unless-stopped

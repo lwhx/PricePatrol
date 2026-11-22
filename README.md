@@ -124,8 +124,18 @@ cp .env.example .env
 # 编辑.env并填好密钥
 chmod 600 .env
 docker compose config --quiet
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose ps
+```
+
+根目录 `compose.yaml` 与 `deploy/compose.yaml` 默认都拉取 `ghcr.io/lwhx/pricepatrol:latest`，不会在服务器上隐式源码构建。设置了 `pull_policy: always`，执行 `docker compose up -d` 会主动检查镜像更新；需要固定已验收版本时请在 `.env` 指定 `IMAGE=ghcr.io/lwhx/pricepatrol:sha-完整提交SHA`。
+
+如需从仓库源码构建本地镜像，而不是使用 GHCR 发布版：
+
+```bash
+docker build -t pricepatrol:local .
+IMAGE=pricepatrol:local docker compose up -d --pull never
 ```
 
 默认仅将 `127.0.0.1:3000` 映射至宿主机。可通过 SSH 隧道访问，或用 HTTPS 反向代理转发；HTTPS 访问时设置 `COOKIE_SECURE=true` 并重新创建容器。需要内网直连时设置 `BIND_ADDRESS` 为适当网卡地址。首次访问设置管理员密码，升级时保留原数据卷与密钥。
@@ -175,7 +185,7 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u 你的GitHub用户名 --password-st
 
 `GHCR_TOKEN` 需要 `read:packages` 权限。公开仓库的镜像默认可匿名拉取。数据卷与 `ENCRYPTION_KEY` 在升级时必须保留；网络和平台账号验收必须在目标 Linux 出口重新执行。
 
-也可以继续使用仓库根目录的 `compose.yaml` 在服务器上源码构建，两种方式使用同一数据卷约定，可互相切换。
+仓库根目录的 `compose.yaml` 现在默认同样拉取 GHCR 发布版；如需源码构建，请使用上方的 `docker build` 命令并明确覆盖 `IMAGE`。两种方式使用同一数据卷约定，可互相切换。
 
 ## 备份与恢复
 
