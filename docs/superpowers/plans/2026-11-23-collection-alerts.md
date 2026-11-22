@@ -62,7 +62,7 @@ Files: web/src/pages/*Task*.vue; web/src/components/RunTable.vue; new AlertRunTa
 - [x] Update README and API contracts with trigger matrix, migration and recovery semantics.
 - [x] Run npm run check; review migration, retry and notification state behavior independently.
 - [x] Address important review findings with regression tests; verify git diff and full suite.
-- [ ] Commit, push feature branch and open a draft pull request with validation evidence.
+- [x] Commit, push feature branch and open a draft pull request with validation evidence.
 
 ## Verification record
 
@@ -70,3 +70,10 @@ Files: web/src/pages/*Task*.vue; web/src/components/RunTable.vue; new AlertRunTa
 - Main suite: 223 passed, 1 optional real-Chromium test skipped. UI suite: 51 passed. Type checks and production build passed.
 - Independent review found and resolved notification blocking, whitelist preview source-scope intersection, and compatibility of explicit collection-status rules. Regression tests cover each fix.
 - Real merchant collection and external notification delivery were not performed. Tests use local collector fixtures and intercepted notification transport.
+
+## Delivery
+
+- Implementation commit: `bb5ea19df02763b675d313bc205370d3f1af19b6`.
+- Feature branch: `feat/separate-collection-alerts`.
+- Draft pull request: https://github.com/lwhx/PricePatrol/pull/1.
+- Remote implementation tree matches the locally verified tree exactly; no merge or deployment was performed.
