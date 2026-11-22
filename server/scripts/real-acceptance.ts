@@ -47,7 +47,7 @@ try{
   const account:VerifiedAccount=await collector.verify({platform:'tmall',cookies:cookies(),userAgent,appKey},AbortSignal.timeout(120000));
   const at=new Date().toISOString();
   store.saveShop({id:'acceptance',name:account.shopName,sellerId:account.sellerId,platform:account.platform,enabled:true,sessionStatus:'valid',lastVerifiedAt:at,lastError:null,createdAt:at,updatedAt:at,hasCookies:true},account);
-  store.saveTask({id:'accept-task',shopId:'acceptance',name:'真实账号验收',enabled:false,scope:'selected',productIds,rules:[{mode:'all',conditions:[{field:'discount',op:'lt',value:'8.5'}]}],whitelist:{productIds:[],titleKeywords:['自由岛']},schedule:{kind:'manual',time:'09:00',days:[],timezone:'Asia/Shanghai'},notify:false,version:1,createdAt:at,updatedAt:at,nextRunAt:null});
+  store.saveTask({id:'accept-task',shopId:'acceptance',name:'真实账号验收',enabled:false,scope:'selected',productIds,schedule:{kind:'manual',time:'09:00',days:[],timezone:'Asia/Shanghai'},version:1,createdAt:at,updatedAt:at,nextRunAt:null});
   const run=worker.enqueue('acceptance','accept-task');
   const deadline=Date.now()+15*60*1000;
   while(Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,1000));if(['success','partial','failed','stopped','auth_required'].includes(store.getRun(run.id)!.status))break;}
@@ -67,6 +67,7 @@ try{
     alerts:store.listAlerts({runId:run.id}).length,sample:three.slice(0,3).map(row=>({skuId:row.skuId,backendPrice:row.backendPrice,before:row.before,after:row.after,discount:row.discount}))};
   console.log(JSON.stringify(summary,null,2));
   if(saved.status!=='success'&&saved.status!=='partial')process.exitCode=2;
+  if(saved.trigger!=='manual'||store.listAlertRuns().length||store.listAlerts({runId:run.id}).length)process.exitCode=5;
   if(!three.length||three.length!==verified.length)process.exitCode=3;
   if(exported.rowCount!==new Set(three.map(row=>row.productId)).size)process.exitCode=4;
 }finally{await worker.close();store.close();rmSync(dir,{recursive:true,force:true});}

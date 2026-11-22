@@ -12,7 +12,7 @@ const store=new Store(join(dataDir,'monitor.sqlite'),encryptionKey);
 if(process.env.ADMIN_PASSWORD&&!store.getConfig('admin.hash','')){if(process.env.ADMIN_PASSWORD.length<10)throw Error('ADMIN_PASSWORD至少10字符');store.setConfig('admin.hash',await hashPassword(process.env.ADMIN_PASSWORD));}
 const port=Number(process.env.PORT||3000);const host=process.env.HOST||'127.0.0.1';
 const allowedOrigins=(process.env.ALLOWED_ORIGINS||'http://localhost:5173,http://127.0.0.1:5173').split(',').filter(Boolean);
-const {app,worker,scheduler}=await buildApp({store,collector:createCollector(),dataDir,encryptionKey,allowedOrigins});worker.recover();scheduler.start();
+const {app,worker,alertWorker,scheduler}=await buildApp({store,collector:createCollector(),dataDir,encryptionKey,allowedOrigins});worker.recover();alertWorker.recover();scheduler.start();
 await app.listen({host,port});console.log(`电商价格监控已启动：http://${host}:${port}`);
 let stopping=false;async function close(){if(stopping)return;stopping=true;await app.close();store.close();process.exit(0);}
 process.on('SIGINT',()=>void close());process.on('SIGTERM',()=>void close());

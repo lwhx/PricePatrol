@@ -5,10 +5,12 @@ import {dirname,resolve} from 'node:path';
 import {Vault} from './security.js';
 import {queryStore,queryAllStore,registerQueryFunctions} from './query.js';
 import {moneyCents,formatDiscount,rowKey} from './domain.js';
-import type {Run,MonitorTask,Shop,VerifiedAccount,ProductCollection,PriceRow,Alert,QueryInput,QueryResult,ProductRow,Overview} from '../../shared/contracts.js';
+import {migrateCollectionAlerts} from './migrations.js';
+import type {Run,RunStatus,CollectionTask,AlertTask,AlertRun,Shop,VerifiedAccount,ProductCollection,PriceRow,Alert,QueryInput,QueryResult,ProductRow,Overview} from '../../shared/contracts.js';
 // Serialize integer cents without routing through floating-point division.
 function moneyText(cents:number|null):string|null{if(cents===null)return null;const integer=BigInt(cents),absolute=integer<0n?-integer:integer;return `${integer<0n?'-':''}${absolute/100n}.${String(absolute%100n).padStart(2,'0')}`;}
-export type RunRecord=Run&{taskSnapshot:MonitorTask|null;mergedSchedules?:number};
+export type RunRecord=Run&{taskSnapshot:CollectionTask|null;alertTaskSnapshots?:AlertTask[];mergedSchedules?:number};
+export type AlertRunRecord=AlertRun&{taskSnapshot:AlertTask};
 export class Store {
  db:DatabaseSync;
  private vault:Vault;
@@ -28,8 +30,9 @@ export class Store {
    CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES runs(id),shop_id TEXT NOT NULL REFERENCES shops(id),product_id TEXT NOT NULL,sku_id TEXT NOT NULL,payload TEXT NOT NULL,UNIQUE(run_id,shop_id,product_id,sku_id));
    CREATE TABLE IF NOT EXISTS queries(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
   `);
+  migrateCollectionAlerts(this.db);
   this.db.exec('CREATE TABLE IF NOT EXISTS metadata(revision INTEGER NOT NULL); INSERT INTO metadata SELECT 0 WHERE NOT EXISTS(SELECT 1 FROM metadata)');
-  for(const table of ['latest','prices','annotations','tasks'])for(const action of ['INSERT','UPDATE','DELETE'])this.db.exec(`CREATE TRIGGER IF NOT EXISTS revision_${table}_${action} AFTER ${action} ON ${table} BEGIN UPDATE metadata SET revision=revision+1; END`);
+  for(const table of ['latest','prices','annotations','tasks','alert_tasks'])for(const action of ['INSERT','UPDATE','DELETE'])this.db.exec(`CREATE TRIGGER IF NOT EXISTS revision_${table}_${action} AFTER ${action} ON ${table} BEGIN UPDATE metadata SET revision=revision+1; END`);
   registerQueryFunctions(this.db);
  }
  close(){if(!this.closed){this.db.close();this.closed=true;}}
@@ -38,38 +41,76 @@ export class Store {
   if(previous&&(previous.sellerId!==shop.sellerId||previous.platform!==shop.platform))throw Error('店铺身份不可更改');
   if(credentials&&(credentials.sellerId!==shop.sellerId||credentials.platform!==shop.platform))throw Error('凭据与店铺不匹配');
   const safe:Shop={id:shop.id,name:shop.name,sellerId:shop.sellerId,platform:shop.platform,enabled:shop.enabled,sessionStatus:shop.sessionStatus,lastVerifiedAt:shop.lastVerifiedAt,lastError:shop.lastError,createdAt:shop.createdAt,updatedAt:shop.updatedAt,hasCookies:!!credentials||!!previous?.hasCookies};
-  this.db.prepare('INSERT INTO shops VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,credentials=coalesce(excluded.credentials,shops.credentials)').run(shop.id,JSON.stringify(safe),credentials?this.vault.seal(credentials):null);
+  this.db.prepare('INSERT INTO shops(id,payload,credentials,credential_version) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,credentials=coalesce(excluded.credentials,shops.credentials),credential_version=shops.credential_version+excluded.credential_version').run(shop.id,JSON.stringify(safe),credentials?this.vault.seal(credentials):null,credentials?1:0);
  }
  getShop(id:string):Shop|undefined{return this.readOne<Shop>('SELECT payload FROM shops WHERE id=?',id);}
  listShops():Shop[]{return this.readMany<Shop>('SELECT payload FROM shops ORDER BY id');}
  getCredentials(id:string):VerifiedAccount{const record=this.db.prepare('SELECT credentials FROM shops WHERE id=?').get(id);if(!record?.credentials)throw Error('店铺未配置凭据');return this.vault.open<VerifiedAccount>(String(record.credentials));}
+ getCredentialVersion(id:string):number{return Number(this.db.prepare('SELECT credential_version FROM shops WHERE id=?').get(id)?.credential_version||0);}
  setConfig(key:string,value:unknown):void{this.db.prepare('INSERT INTO config VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload').run(key,JSON.stringify(value));}
  getConfig<T>(key:string,fallback:T):T{return this.readOne<T>('SELECT payload FROM config WHERE key=?',key)??fallback;}
- saveTask(task:MonitorTask):void{
+ saveTask(task:CollectionTask):void{
   if(!this.getShop(task.shopId))throw Error('店铺不存在');
-  const previous=this.readOne<MonitorTask>('SELECT payload FROM tasks WHERE id=?',task.id);
+  const previous=this.readOne<CollectionTask>('SELECT payload FROM tasks WHERE id=?',task.id);
   if(previous&&previous.shopId!==task.shopId)throw Error('任务归属不可更改');
-  this.db.prepare('INSERT INTO tasks(id,shop_id,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(task.id,task.shopId,JSON.stringify(task));
+  const {id,shopId,name,enabled,scope,productIds,schedule,version,createdAt,updatedAt,nextRunAt}=task;
+  this.db.prepare('INSERT INTO tasks(id,shop_id,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(id,shopId,JSON.stringify({id,shopId,name,enabled,scope,productIds,schedule,version,createdAt,updatedAt,nextRunAt}));
  }
- getTask(id:string):MonitorTask|undefined{return this.readOne<MonitorTask>('SELECT payload FROM tasks WHERE id=? AND deleted=0',id);}
- listTasks():MonitorTask[]{return this.readMany<MonitorTask>('SELECT payload FROM tasks WHERE deleted=0 ORDER BY id');}
- deleteTask(id:string):void{this.db.prepare('UPDATE tasks SET deleted=1 WHERE id=?').run(id);}
+ getTask(id:string):CollectionTask|undefined{return this.readOne<CollectionTask>('SELECT payload FROM tasks WHERE id=? AND deleted=0',id);}
+ listTasks():CollectionTask[]{return this.readMany<CollectionTask>('SELECT payload FROM tasks WHERE deleted=0 ORDER BY id');}
+ deleteTask(id:string):void{this.transaction(()=>{this.db.prepare('UPDATE tasks SET deleted=1 WHERE id=?').run(id);this.db.prepare('UPDATE alert_tasks SET deleted=1 WHERE collection_task_id=?').run(id);});}
+ saveAlertTask(task:AlertTask):void{
+  const collection=this.getTask(task.collectionTaskId);
+  if(!collection||collection.shopId!==task.shopId)throw Error('预警任务与采集任务店铺不匹配');
+  const old=this.readOne<AlertTask>('SELECT payload FROM alert_tasks WHERE id=?',task.id);
+  if(old&&(old.collectionTaskId!==task.collectionTaskId||old.shopId!==task.shopId))throw Error('预警任务归属不可更改');
+  this.db.prepare('INSERT INTO alert_tasks(id,collection_task_id,shop_id,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(task.id,task.collectionTaskId,task.shopId,JSON.stringify(task));
+ }
+ getAlertTask(id:string):AlertTask|undefined{return this.readOne<AlertTask>('SELECT payload FROM alert_tasks WHERE id=? AND deleted=0',id);}
+ listAlertTasks():AlertTask[]{return this.readMany<AlertTask>('SELECT payload FROM alert_tasks WHERE deleted=0 ORDER BY id');}
+ deleteAlertTask(id:string):void{this.db.prepare('UPDATE alert_tasks SET deleted=1 WHERE id=?').run(id);}
  saveRun(run:RunRecord):void{
   if(!this.getShop(run.shopId))throw Error('店铺不存在');
-  const task=run.taskId?this.readOne<MonitorTask>('SELECT payload FROM tasks WHERE id=?',run.taskId):undefined;
+  const task=run.taskId?this.readOne<CollectionTask>('SELECT payload FROM tasks WHERE id=?',run.taskId):undefined;
   if(run.taskId&&(!task||task.shopId!==run.shopId))throw Error('作业与任务店铺不匹配');
   if(run.taskSnapshot&&(run.taskSnapshot.shopId!==run.shopId||run.taskSnapshot.id!==run.taskId))throw Error('任务快照归属不匹配');
   if(run.parentRunId&&this.getRun(run.parentRunId)?.shopId!==run.shopId)throw Error('父作业归属不匹配');
   const old=this.getRun(run.id);
   if(old&&(old.shopId!==run.shopId||old.taskId!==run.taskId))throw Error('作业归属不可更改');
-  const value={...run,createdAt:old?.createdAt||run.createdAt,taskSnapshot:old?old.taskSnapshot:run.taskSnapshot};
+  if(old&&run.trigger!==undefined&&run.trigger!==old.trigger)throw Error('采集执行来源不可更改');
+  const value:RunRecord={...run,trigger:old?.trigger||run.trigger||'legacy',alertDispatchStatus:run.alertDispatchStatus||old?.alertDispatchStatus||'not_applicable',createdAt:old?.createdAt||run.createdAt,taskSnapshot:old?old.taskSnapshot:run.taskSnapshot,alertTaskSnapshots:old?(old.alertTaskSnapshots||[]):(run.alertTaskSnapshots||[])};
+  if(old&&['dispatched','skipped'].includes(old.alertDispatchStatus||'')&&value.alertDispatchStatus!==old.alertDispatchStatus)throw Error('预警派发状态不可回退');
+  if(value.trigger!=='scheduled'&&(value.alertTaskSnapshots!.length||value.alertDispatchStatus!=='not_applicable'))throw Error('手动或旧版采集不能派发预警');
+  for(const snapshot of value.alertTaskSnapshots!)if(snapshot.shopId!==run.shopId||snapshot.collectionTaskId!==run.taskId)throw Error('预警快照归属不匹配');
   if(old?.finishedAt&&['success','partial','failed'].includes(old.status)){
-   for(const key of new Set([...Object.keys(old),...Object.keys(value)]))if(key!=='notificationStatus'&&JSON.stringify((old as unknown as Record<string,unknown>)[key])!==JSON.stringify((value as unknown as Record<string,unknown>)[key]))throw Error('已结束作业报告不可更改');
+   for(const key of new Set([...Object.keys(old),...Object.keys(value)]))if(!['notificationStatus','alertDispatchStatus'].includes(key)&&JSON.stringify((old as unknown as Record<string,unknown>)[key])!==JSON.stringify((value as unknown as Record<string,unknown>)[key]))throw Error('已结束作业报告不可更改');
   }
   this.db.prepare('INSERT INTO runs VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(run.id,run.shopId,run.taskId,old?.createdAt||run.createdAt,JSON.stringify(value));
  }
  getRun(id:string):RunRecord|undefined{return this.readOne<RunRecord>('SELECT payload FROM runs WHERE id=?',id);}
  listRuns():RunRecord[]{return this.readMany<RunRecord>('SELECT payload FROM runs ORDER BY created_at DESC,id DESC LIMIT 200');}
+ operationalRuns(statuses:RunStatus[]):RunRecord[]{return this.readMany<RunRecord>("SELECT payload FROM runs WHERE json_extract(payload,'$.status') IN(SELECT value FROM json_each(?)) ORDER BY created_at,id",JSON.stringify(statuses));}
+ pendingAlertCollections():RunRecord[]{return this.readMany<RunRecord>("SELECT payload FROM runs WHERE json_extract(payload,'$.trigger')='scheduled' AND json_extract(payload,'$.alertDispatchStatus')='pending' AND json_extract(payload,'$.finishedAt') IS NOT NULL AND json_extract(payload,'$.status') IN('success','partial') ORDER BY created_at,id");}
+ saveAlertRun(run:AlertRunRecord):void{
+  const source=this.getRun(run.collectionRunId);
+  const task=this.readOne<AlertTask>('SELECT payload FROM alert_tasks WHERE id=?',run.alertTaskId);
+  if(!source||source.trigger!=='scheduled'||!source.finishedAt||!['success','partial'].includes(source.status))throw Error('只有已完成的定时采集可以执行预警');
+  if(!task||task.shopId!==run.shopId||source.shopId!==run.shopId||source.taskId!==task.collectionTaskId||run.taskSnapshot.id!==task.id||run.taskSnapshot.collectionTaskId!==source.taskId||run.taskSnapshot.shopId!==run.shopId)throw Error('预警执行归属不匹配');
+  const old=this.getAlertRun(run.id);
+  if(old&&(old.collectionRunId!==run.collectionRunId||old.alertTaskId!==run.alertTaskId))throw Error('预警执行归属不可更改');
+  const value={...run,createdAt:old?.createdAt||run.createdAt,taskSnapshot:old?old.taskSnapshot:run.taskSnapshot};
+  if(old?.finishedAt){for(const key of new Set([...Object.keys(old),...Object.keys(value)]))if(key!=='notificationStatus'&&JSON.stringify((old as any)[key])!==JSON.stringify((value as any)[key]))throw Error('已结束预警报告不可更改');}
+  this.db.prepare('INSERT INTO alert_runs VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(run.id,run.collectionRunId,run.alertTaskId,value.createdAt,JSON.stringify(value));
+ }
+ getAlertRun(id:string):AlertRunRecord|undefined{return this.readOne<AlertRunRecord>('SELECT payload FROM alert_runs WHERE id=?',id);}
+ listAlertRuns(filters:{collectionRunId?:string;alertTaskId?:string}={}):AlertRunRecord[]{
+  const clauses:string[]=[],args:string[]=[];
+  for(const [key,column] of [['collectionRunId','collection_run_id'],['alertTaskId','alert_task_id']] as const)if(filters[key]){clauses.push(`${column}=?`);args.push(filters[key]!);}
+  return this.readMany<AlertRunRecord>(`SELECT payload FROM alert_runs ${clauses.length?'WHERE '+clauses.join(' AND '):''} ORDER BY created_at DESC,id DESC LIMIT 200`,...args);
+ }
+ operationalAlertRuns(statuses:AlertRun['status'][]):AlertRunRecord[]{return this.readMany<AlertRunRecord>("SELECT payload FROM alert_runs WHERE json_extract(payload,'$.status') IN(SELECT value FROM json_each(?)) ORDER BY created_at,id",JSON.stringify(statuses));}
+ interruptedAlertNotifications():AlertRunRecord[]{return this.readMany<AlertRunRecord>("SELECT payload FROM alert_runs WHERE json_extract(payload,'$.notificationStatus')='sending'");}
+ pendingAlertNotifications():AlertRunRecord[]{return this.readMany<AlertRunRecord>("SELECT payload FROM alert_runs WHERE json_extract(payload,'$.notificationStatus')='pending' AND json_extract(payload,'$.finishedAt') IS NOT NULL AND json_extract(payload,'$.status') IN('success','partial') ORDER BY created_at,id");}
  transaction<T>(fn:()=>T):T{
   if(this.db.isTransaction)return fn();this.db.exec('BEGIN IMMEDIATE');
   try{const value=fn();this.db.exec('COMMIT');return value;}catch(error){this.db.exec('ROLLBACK');throw error;}
@@ -85,8 +126,14 @@ export class Store {
    const sources=[...product.rows];
    if(product.error){for(const old of existing)if(!sources.some(r=>rowKey(r)===old.id))sources.push({...old,status:'stale',error:product.error});}
    if(!sources.length&&product.error)sources.push({shopId:run.shopId,productId:product.productId,skuId:'',title:product.title,specs:'',seatSpec:'',color:'',backendPrice:null,before:null,after:null,backendVerified:false,status:'error',error:product.error,sourceUrl:'',backendSource:'',detailFetchedAt:null,backendFetchedAt:null,stock:null});
+   // A resumed batch can replace its own failed placeholder, but never completed evidence.
+   if(!run.finishedAt&&!product.error&&sources.length&&sources.every(row=>row.status==='ok')){
+    this.db.prepare("DELETE FROM prices WHERE run_id=? AND shop_id=? AND product_id=? AND sku_id='' AND json_extract(payload,'$.status')!='ok'").run(runId,run.shopId,product.productId);
+    this.db.prepare("DELETE FROM latest WHERE shop_id=? AND product_id=? AND sku_id='' AND json_extract(payload,'$.status')!='ok'").run(run.shopId,product.productId);
+   }
    for(let source of sources){
-    const id=rowKey(source);if(this.db.prepare('SELECT 1 FROM prices WHERE run_id=? AND id=?').get(runId,id))continue;
+    const id=rowKey(source),priorRow=this.readOne<PriceRow>('SELECT payload FROM prices WHERE run_id=? AND id=?',runId,id);
+    if(priorRow&&(run.finishedAt||priorRow.status==='ok'&&!priorRow.stale||source.status!=='ok'||!!product.error))continue;
     if(run.finishedAt)throw Error('已结束作业快照不可更改');
     const old=existing.find(r=>r.id===id);
     const stale=source.status==='stale'||!!old&&((source.after===null&&old.after!==null)||(source.backendPrice===null&&old.backendPrice!==null));
@@ -94,7 +141,7 @@ export class Store {
     const backendPrice=moneyText(moneyCents(source.backendPrice)),before=moneyText(moneyCents(source.before)),after=moneyText(moneyCents(source.after));
     const base=moneyCents(backendPrice),current=moneyCents(after),prior=moneyCents(before);
     const row:PriceRow={...source,backendPrice,before,after,id,runId,shopName:shop.name,discount:source.backendVerified&&!stale?formatDiscount(backendPrice,after):null,saving:source.backendVerified&&base!==null&&current!==null?moneyText(base-current):null,priceDifference:source.backendVerified&&base!==null&&prior!==null?moneyText(prior-base):null,updatedAt:new Date().toISOString(),tags:[],note:'',stale};
-    const payload=JSON.stringify(row);this.db.prepare('INSERT INTO prices VALUES(?,?,?,?,?,?)').run(runId,id,run.shopId,row.productId,row.skuId,payload);
+    const payload=JSON.stringify(row);this.db.prepare('INSERT INTO prices VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,id) DO UPDATE SET payload=excluded.payload').run(runId,id,run.shopId,row.productId,row.skuId,payload);
     this.db.prepare('INSERT INTO latest VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,payload=excluded.payload').run(id,run.shopId,row.productId,row.skuId,runId,payload);
    }
   });
@@ -103,13 +150,16 @@ export class Store {
  history(shopId:string,productId:string,skuId?:string):PriceRow[]{return this.readMany<PriceRow>(`SELECT p.payload FROM prices p JOIN runs r ON r.id=p.run_id WHERE p.shop_id=? AND p.product_id=? ${skuId===undefined?'':'AND p.sku_id=?'} ORDER BY r.created_at DESC,p.run_id DESC,p.sku_id LIMIT 1000`,...([shopId,productId,...(skuId===undefined?[]:[skuId])]));}
  saveAlert(alert:Alert):void{
   const run=this.getRun(alert.runId);
-  if(!run||run.shopId!==alert.shopId||run.taskId!==alert.taskId)throw Error('预警归属不匹配');
+  const evaluation=alert.alertRunId?this.getAlertRun(alert.alertRunId):undefined;
+  if(!run||run.shopId!==alert.shopId)throw Error('预警归属不匹配');
+  if(alert.alertRunId){if(!evaluation||evaluation.collectionRunId!==run.id||evaluation.alertTaskId!==alert.taskId||evaluation.shopId!==alert.shopId||evaluation.finishedAt||alert.ruleVersion!==evaluation.ruleVersion)throw Error('预警执行归属不匹配');}
+  else if(run.trigger!=='legacy'||run.taskId!==alert.taskId)throw Error('预警必须属于独立的定时预警执行');
   if(!this.db.prepare('SELECT 1 FROM prices WHERE run_id=? AND shop_id=? AND product_id=? AND sku_id=?').get(alert.runId,alert.shopId,alert.productId,alert.skuId))throw Error('预警价格证据不存在');
-  this.db.prepare('INSERT OR IGNORE INTO alerts VALUES(?,?,?,?,?,?)').run(alert.id,alert.runId,alert.shopId,alert.productId,alert.skuId,JSON.stringify(alert));
+  this.db.prepare('INSERT OR IGNORE INTO alerts VALUES(?,?,?,?,?,?,?)').run(alert.id,alert.runId,alert.shopId,alert.productId,alert.skuId,JSON.stringify(alert),alert.alertRunId||null);
  }
- listAlerts(filters:{state?:string;shopId?:string;runId?:string}={}):Alert[]{
+ listAlerts(filters:{state?:string;shopId?:string;runId?:string;alertRunId?:string}={}):Alert[]{
   const conditions:string[]=[],args:string[]=[];
-  for(const [key,column] of [['state',"json_extract(payload,'$.state')"],['shopId','shop_id'],['runId','run_id']] as const)if(filters[key]){conditions.push(`${column}=?`);args.push(filters[key]!);}
+  for(const [key,column] of [['state',"json_extract(payload,'$.state')"],['shopId','shop_id'],['runId','run_id'],['alertRunId','alert_run_id']] as const)if(filters[key]){conditions.push(`${column}=?`);args.push(filters[key]!);}
   return this.readMany<Alert>(`SELECT payload FROM alerts ${conditions.length?'WHERE '+conditions.join(' AND '):''} ORDER BY json_extract(payload,'$.createdAt') DESC,id DESC LIMIT 1000`,...args);
  }
  getAlert(id:string):Alert|undefined{return this.readOne<Alert>('SELECT payload FROM alerts WHERE id=?',id);}
@@ -137,7 +187,7 @@ export class Store {
  cleanup(before:string):number{
   if(!Number.isFinite(Date.parse(before)))throw Error('无效清理时间');
   return this.transaction(()=>{
-   const eligible=`SELECT id FROM runs WHERE json_extract(payload,'$.finishedAt') IS NOT NULL AND julianday(json_extract(payload,'$.finishedAt'))<julianday(?) AND id NOT IN(SELECT run_id FROM alerts)`;
+   const eligible=`SELECT id FROM runs WHERE json_extract(payload,'$.finishedAt') IS NOT NULL AND julianday(json_extract(payload,'$.finishedAt'))<julianday(?) AND coalesce(json_extract(payload,'$.alertDispatchStatus'),'not_applicable')!='pending' AND id NOT IN(SELECT run_id FROM alerts) AND id NOT IN(SELECT collection_run_id FROM alert_runs)`;
    const prices=this.db.prepare(`DELETE FROM prices WHERE run_id IN(${eligible})`).run(before);
    const runs=this.db.prepare(`DELETE FROM runs WHERE id IN(${eligible}) AND id NOT IN(SELECT run_id FROM latest)`).run(before);
    return Number(prices.changes)+Number(runs.changes);
@@ -145,7 +195,7 @@ export class Store {
  }
  overview():Overview{
   const scalar=(sql:string)=>Number(this.db.prepare(sql).get()?.n||0);
-  return {shops:scalar('SELECT count(*) n FROM shops'),tasks:scalar('SELECT count(*) n FROM tasks WHERE deleted=0'),products:scalar('SELECT count(*) n FROM(SELECT 1 FROM latest GROUP BY shop_id,product_id)'),skus:scalar('SELECT count(*) n FROM latest'),pendingAlerts:scalar("SELECT count(*) n FROM alerts WHERE json_extract(payload,'$.state')='pending'"),running:scalar("SELECT count(*) n FROM runs WHERE json_extract(payload,'$.status') IN('queued','running')"),failedRows:scalar("SELECT count(*) n FROM latest WHERE json_extract(payload,'$.stale')=1 OR json_extract(payload,'$.status')!='ok'"),recentRuns:this.listRuns().slice(0,10)};
+  return {shops:scalar('SELECT count(*) n FROM shops'),tasks:scalar('SELECT count(*) n FROM tasks WHERE deleted=0'),alertTasks:scalar('SELECT count(*) n FROM alert_tasks WHERE deleted=0'),products:scalar('SELECT count(*) n FROM(SELECT 1 FROM latest GROUP BY shop_id,product_id)'),skus:scalar('SELECT count(*) n FROM latest'),pendingAlerts:scalar("SELECT count(*) n FROM alerts WHERE json_extract(payload,'$.state')='pending'"),running:scalar("SELECT count(*) n FROM runs WHERE json_extract(payload,'$.status') IN('queued','running')"),failedRows:scalar("SELECT count(*) n FROM latest WHERE json_extract(payload,'$.stale')=1 OR json_extract(payload,'$.status')!='ok'"),recentRuns:this.listRuns().slice(0,10).map(({taskSnapshot:_,alertTaskSnapshots:__,...run})=>run)};
  }
  async backup(destination:string):Promise<void>{
   const target=resolve(destination);if(existsSync(target))throw Error('备份目标已存在');mkdirSync(dirname(target),{recursive:true});
