@@ -129,7 +129,7 @@ docker compose up -d
 docker compose ps
 ```
 
-根目录 `compose.yaml` 与 `deploy/compose.yaml` 默认都拉取 `ghcr.io/lwhx/pricepatrol:latest`，不会在服务器上隐式源码构建。设置了 `pull_policy: always`，执行 `docker compose up -d` 会主动检查镜像更新；需要固定已验收版本时请在 `.env` 指定 `IMAGE=ghcr.io/lwhx/pricepatrol:sha-完整提交SHA`。
+根目录 `docker-compose.yaml` 与 `deploy/compose.yaml` 默认都拉取 `ghcr.io/lwhx/pricepatrol:latest`，不会在服务器上隐式源码构建。设置了 `pull_policy: always`，执行 `docker compose up -d` 会主动检查镜像更新；需要固定已验收版本时请在 `.env` 指定 `IMAGE=ghcr.io/lwhx/pricepatrol:sha-完整提交SHA`。
 
 如需从仓库源码构建本地镜像，而不是使用 GHCR 发布版：
 
@@ -138,7 +138,7 @@ docker build -t pricepatrol:local .
 IMAGE=pricepatrol:local docker compose up -d --pull never
 ```
 
-默认仅将 `127.0.0.1:3000` 映射至宿主机。可通过 SSH 隧道访问，或用 HTTPS 反向代理转发；HTTPS 访问时设置 `COOKIE_SECURE=true` 并重新创建容器。需要内网直连时设置 `BIND_ADDRESS` 为适当网卡地址。首次访问设置管理员密码，升级时保留原数据卷与密钥。
+两份 Compose 都将容器内的 `3000` 端口发布为宿主机 `6300` 端口，默认绑定所有网络接口，即 `6300:3000`。部署完成后可使用 `http://服务器IP:6300` 访问；请确保服务器防火墙/安全组允许所需来源访问。对公网开放时建议配置 HTTPS 反向代理，设置 `COOKIE_SECURE=true`，并在受控环境完成首次管理员密码初始化。端口映射固定，不再使用旧的 `BIND_ADDRESS` / `APP_PORT` 环境变量；若需改端口，直接编辑 Compose 的 `ports`。升级时保留原数据卷与密钥。
 
 Dockerfile 先 `npm ci` 构建前端，运行阶段 `npm ci --omit=dev` 后调用**锁定的本地 Playwright CLI**安装 Chromium 及 Debian 系统依赖。采用 `node:24-bookworm-slim`，避开 Playwright npm 版本范围与预制浏览器镜像版本不一致的问题。生产入口为 `node --import tsx server/src/main.ts`，以 `node` 用户运行，镜像内含中文字体 `fonts-noto-cjk`。Compose 提供 init、1 GiB 共享内存、健康检查和日志轮转；镜像带 OCI 标签，指向本仓库。
 
@@ -167,7 +167,7 @@ curl -fsSLO https://raw.githubusercontent.com/lwhx/PricePatrol/main/deploy/compo
 curl -fsSL https://raw.githubusercontent.com/lwhx/PricePatrol/main/deploy/.env.example -o .env.example
 
 cp .env.example .env
-# 编辑 .env：至少填 ENCRYPTION_KEY；需要时改 IMAGE / BIND_ADDRESS / APP_PORT
+# 编辑 .env：至少填 ENCRYPTION_KEY；需要时改 IMAGE
 chmod 600 .env
 
 docker compose --env-file .env pull
@@ -185,7 +185,7 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u 你的GitHub用户名 --password-st
 
 `GHCR_TOKEN` 需要 `read:packages` 权限。公开仓库的镜像默认可匿名拉取。数据卷与 `ENCRYPTION_KEY` 在升级时必须保留；网络和平台账号验收必须在目标 Linux 出口重新执行。
 
-仓库根目录的 `compose.yaml` 现在默认同样拉取 GHCR 发布版；如需源码构建，请使用上方的 `docker build` 命令并明确覆盖 `IMAGE`。两种方式使用同一数据卷约定，可互相切换。
+仓库根目录的 `docker-compose.yaml` 现在默认同样拉取 GHCR 发布版；如需源码构建，请使用上方的 `docker build` 命令并明确覆盖 `IMAGE`。两种方式使用同一数据卷约定，可互相切换。
 
 ## 备份与恢复
 

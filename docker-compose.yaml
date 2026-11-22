@@ -10,8 +10,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     shm_size: 1gb
+    # 对外发布宿主机 6300 端口，容器内部仍使用 3000 端口。
+    # 未限定宿主机 IP，Docker 默认绑定所有网络接口。
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"
+      - "6300:3000"
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0

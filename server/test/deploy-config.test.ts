@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { it, expect } from 'vitest';
 
 const text = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
-const root = text('compose.yaml');
+const root = text('docker-compose.yaml');
 const deploy = text('deploy/compose.yaml');
 const envExample = text('.env.example');
 const deployEnv = text('deploy/.env.example');
@@ -32,7 +32,9 @@ it('lets a server run from deploy/ files alone without a source checkout', () =>
   // Both entry points must agree on the container port and data directory.
   for (const file of [root, deploy]) {
     expect(file).toContain('DATA_DIR: /app/data');
-    expect(file).toContain('"${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"');
+    expect(file).toContain('"6300:3000"');
+    expect(file).not.toContain('"${BIND_ADDRESS:-127.0.0.1}');
+    expect(file).not.toContain('${APP_PORT:-3000}');
     expect(file).toContain('/api/auth/status');
   }
 });

@@ -9,8 +9,8 @@
 # 2) docker compose -f deploy/compose.yaml --env-file deploy/.env pull
 # 3) docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
 #
-# 默认只监听 127.0.0.1:3000；远程访问请用 SSH 隧道
-# 或前面加 HTTPS 反向代理（此时把 COOKIE_SECURE 设为 true）。
+# 默认向所有网络接口发布 6300 端口；请使用防火墙控制访问，
+# 如经 HTTPS 反向代理访问，请将 COOKIE_SECURE 设为 true。
 
 name: pricepatrol
 
@@ -27,8 +27,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     shm_size: 1gb
+    # 对外发布宿主机 6300 端口，容器内部仍使用 3000 端口。
+    # 未限定宿主机 IP，Docker 默认绑定所有网络接口。
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"
+      - "6300:3000"
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
