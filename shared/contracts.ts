@@ -10,8 +10,13 @@ export interface Condition {field:RuleField;op:Compare|'contains'|'notContains'|
 export interface RuleGroup {mode:'all'|'any';conditions:Condition[]}
 export interface Whitelist {productIds:string[];titleKeywords:string[]}
 export interface Schedule {kind:'manual'|'daily'|'weekly';time:string;days:number[];timezone:string}
-export interface MonitorTask {id:string;shopId:string;name:string;enabled:boolean;scope:'all'|'selected';productIds:string[];rules:RuleGroup[];whitelist:Whitelist;schedule:Schedule;notify:boolean;version:number;createdAt:string;updatedAt:string;nextRunAt:string|null}
-export type TaskInput = Omit<MonitorTask,'id'|'version'|'createdAt'|'updatedAt'|'nextRunAt'>;
+export interface CollectionTask {id:string;shopId:string;name:string;enabled:boolean;scope:'all'|'selected';productIds:string[];schedule:Schedule;version:number;createdAt:string;updatedAt:string;nextRunAt:string|null}
+/** Serialized pre-split configuration, retained only for historical evidence. */
+export interface MonitorTask extends CollectionTask {rules:RuleGroup[];whitelist:Whitelist;notify:boolean}
+export type TaskInput = Omit<CollectionTask,'id'|'version'|'createdAt'|'updatedAt'|'nextRunAt'>;
+export type CollectionTaskInput = TaskInput;
+export interface AlertTask {id:string;collectionTaskId:string;shopId:string;name:string;enabled:boolean;scope:'all'|'selected';productIds:string[];rules:RuleGroup[];whitelist:Whitelist;notify:boolean;version:number;createdAt:string;updatedAt:string}
+export type AlertTaskInput = Omit<AlertTask,'id'|'shopId'|'version'|'createdAt'|'updatedAt'>;
 export type PriceStatus = 'ok'|'partial'|'error'|'backend_only'|'stale';
 export interface CollectedRow {shopId:string;productId:string;skuId:string;title:string;specs:string;seatSpec:string;color:string;backendPrice:string|null;before:string|null;after:string|null;backendVerified:boolean;status:PriceStatus;error?:string;sourceUrl:string;backendSource:string;detailFetchedAt:string|null;backendFetchedAt:string|null;stock:number|null}
 export interface PriceRow extends CollectedRow {id:string;runId:string;shopName:string;discount:string|null;saving:string|null;priceDifference:string|null;updatedAt:string;tags:string[];note:string;stale:boolean}
@@ -21,8 +26,11 @@ export interface QueryResult {rows:(PriceRow|ProductRow)[];total:number;productC
 export interface ExportInput {query:QueryInput;scope:'selected'|'page'|'all';selectedIds?:string[];fields:string[];format:'ids'|'titles'|'id-title'|'tsv'|'csv'|'text'|'json'|'markdown';header:boolean;allSkus?:boolean;separator?:string}
 export interface ExportResult {token:string;content:string;preview:string;rowCount:number;sourceCount:number;bytes:number;downloadRecommended:boolean;filename:string;mime:string}
 export type RunStatus='queued'|'running'|'success'|'partial'|'failed'|'stopped'|'auth_required'|'recoverable';
-export interface Run {id:string;taskId:string|null;shopId:string;taskName:string;shopName:string;status:RunStatus;scope:'all'|'selected';productIds:string[];expected:number;processed:number;failed:number;rows:number;checked:number;excluded:number;matched:number;unknown:number;message:string;createdAt:string;startedAt:string|null;finishedAt:string|null;parentRunId:string|null;failedProductIds:string[];notificationStatus:string}
-export interface Alert {id:string;runId:string;taskId:string|null;shopId:string;shopName:string;productId:string;skuId:string;title:string;specs:string;backendPrice:string|null;before:string|null;after:string|null;discount:string|null;reasons:string[];state:'pending'|'confirmed'|'resolved';note:string;createdAt:string}
+export type RunTrigger = 'manual'|'scheduled'|'legacy';
+export type AlertDispatchStatus = 'not_applicable'|'pending'|'dispatched'|'skipped';
+export interface Run {id:string;taskId:string|null;shopId:string;taskName:string;shopName:string;status:RunStatus;scope:'all'|'selected';productIds:string[];expected:number;processed:number;failed:number;rows:number;checked:number;excluded:number;matched:number;unknown:number;message:string;createdAt:string;startedAt:string|null;finishedAt:string|null;parentRunId:string|null;failedProductIds:string[];notificationStatus:string;trigger?:RunTrigger;alertDispatchStatus?:AlertDispatchStatus}
+export interface AlertRun {id:string;alertTaskId:string;collectionRunId:string;shopId:string;shopName:string;taskName:string;status:'queued'|'running'|'success'|'partial'|'failed';rows:number;checked:number;excluded:number;matched:number;unknown:number;message:string;ruleVersion:number;createdAt:string;startedAt:string|null;finishedAt:string|null;notificationStatus:string}
+export interface Alert {id:string;runId:string;taskId:string|null;alertRunId?:string|null;ruleVersion?:number;shopId:string;shopName:string;productId:string;skuId:string;title:string;specs:string;backendPrice:string|null;before:string|null;after:string|null;discount:string|null;reasons:string[];state:'pending'|'confirmed'|'resolved';note:string;createdAt:string}
 export interface CollectorProgress {phase:string;expected:number;processed:number;failed:number;message:string}
 export interface ProductCollection {productId:string;title:string;rows:CollectedRow[];error?:string}
 export interface CollectOptions {shopId:string;credentials:VerifiedAccount;productIds?:string[];skipProductIds?:string[];signal:AbortSignal;onProgress:(progress:CollectorProgress)=>void|Promise<void>;onProduct:(product:ProductCollection)=>void|Promise<void>}
@@ -30,4 +38,4 @@ export interface CollectionResult {cookies:CookieRecord[];expected:number;proces
 export interface Collector {verify:(credentials:AccountCredentials,signal?:AbortSignal)=>Promise<VerifiedAccount>;collect:(options:CollectOptions)=>Promise<CollectionResult>}
 export interface NotificationMessage {title:string;description:string;short?:string}
 export interface NotificationSettings {enabled:boolean;hasSendKey:boolean;lastError:string|null}
-export interface Overview {shops:number;tasks:number;products:number;skus:number;pendingAlerts:number;running:number;failedRows:number;recentRuns:Run[]}
+export interface Overview {shops:number;tasks:number;alertTasks?:number;products:number;skus:number;pendingAlerts:number;running:number;failedRows:number;recentRuns:Run[]}

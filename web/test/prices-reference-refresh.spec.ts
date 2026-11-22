@@ -11,6 +11,7 @@ let wrapper: VueWrapper | undefined;
 const reply = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
 const fetcher = vi.fn(async (url: string, _options?: { body?: string }) => {
   if (url === '/api/shops') return reply({ shops: shops.map(s => ({ ...s })) });
+  if (url === '/api/alert-tasks') return reply({ tasks: [{ id: 'legacy-task-id', name: '独立低价预警', shopId: 'a' }] });
   if (url === '/api/prices/query') return reply({ rows: [], total: 0, productCount: 0, skuCount: 0, page: 1, pageSize: 50, revision: 1 });
   return reply({ tasks: [], runs: [], queries: [] });
 });
@@ -19,7 +20,7 @@ const stubs = {
   PageHeader: passthrough, StatCards: true, ErrorBanner: true, RuleEditor: true, CopyDialog: true, PriceHistory: true, RunCompare: true, BatchAction: true,
   ElForm: { emits: ['submit'], template: '<form @submit.prevent="$emit(\'submit\', $event)"><slot /></form>' }, ElFormItem: { props: ['label'], template: '<div :data-label="label"><slot /></div>' },
   ElButton: { props: ['nativeType'], template: '<button :type="nativeType || \'button\'"><slot /></button>' },
-  ElSelect: { emits: ['visible-change'], template: '<div class="test-select" @click="$emit(\'visible-change\', true)"><slot /></div>' },
+  ElSelect: { name: 'ElSelect', emits: ['visible-change', 'update:modelValue'], template: '<div class="test-select" @click="$emit(\'visible-change\', true)"><slot /></div>' },
   ElOption: { props: ['label', 'value'], template: '<span :data-option="value">{{ label }}</span>' },
   ElInput: { props: ['modelValue'], emits: ['update:modelValue'], template: '<input :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />' },
   ElDialog: true, ElPagination: true, ElDatePicker: true, ElRadioGroup: passthrough, ElRadio: passthrough,
@@ -111,4 +112,17 @@ it('sorting and pagination update only private query state', async () => {
   expect(router.currentRoute.value.fullPath).toBe('/prices');
   const sent = fetcher.mock.calls.filter(([url]) => url === '/api/prices/query').at(-1)!;
   expect(JSON.parse(sent[1]!.body!)).toMatchObject({ page: 3, sort: 'after', order: 'asc', search: '已应用关键词' });
+});
+
+it('白名单上下文加载独立预警任务并保留 taskId 查询协议', async () => {
+  await openCachedPrices();
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/alert-tasks')).toBe(true);
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/tasks')).toBe(false);
+  await wrapper!.findAll('button').find(button => button.text().startsWith('展开高级条件'))!.trigger('click'); await flushPromises();
+  const context = wrapper!.get('[data-label="预警任务白名单上下文"]');
+  expect(context.text()).toContain('独立低价预警');
+  context.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'legacy-task-id'); await flushPromises();
+  await wrapper!.get('form').trigger('submit'); await flushPromises();
+  const sent = fetcher.mock.calls.filter(([url]) => url === '/api/prices/query').at(-1)!;
+  expect(JSON.parse(sent[1]!.body!)).toMatchObject({ taskId: 'legacy-task-id' });
 });

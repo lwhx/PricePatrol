@@ -1,5 +1,5 @@
 import type {DatabaseSync,SQLInputValue} from 'node:sqlite';
-import type {QueryInput,QueryResult,PriceRow,ProductRow,RuleGroup,Whitelist} from '../../shared/contracts.js';
+import type {QueryInput,QueryResult,PriceRow,ProductRow,RuleGroup,Whitelist,AlertTask,CollectionTask,MonitorTask} from '../../shared/contracts.js';
 import type {Store} from './database.js';
 import {evaluateRules,moneyCents,formatDiscount,whitelistReason} from './domain.js';
 
@@ -24,18 +24,34 @@ export function readSnapshot<T>(store:Store,fn:()=>T):T{
  if(store.db.isTransaction)return fn();store.db.exec('BEGIN');try{const value=fn();store.db.exec('COMMIT');return value;}catch(error){store.db.exec('ROLLBACK');throw error;}
 }
 interface Plan{cte:string;args:SQLInputValue[];sort:string;page:number;pageSize:number}
+function isLegacyMonitorTask(task:CollectionTask|null):task is MonitorTask{
+ const legacy=task as MonitorTask|null;
+ return !!legacy&&Array.isArray(legacy.rules)&&Array.isArray(legacy.whitelist?.productIds)&&Array.isArray(legacy.whitelist?.titleKeywords);
+}
 function plan(store:Store,input:QueryInput,selectedIds?:string[]):Plan{
  const where:string[]=[],args:SQLInputValue[]=[];
  let groups=input.groups||[];
  if(selectedIds){where.push(`${input.view==='product'?"p.shop_id||':'||p.product_id":'p.id'} IN(SELECT value FROM json_each(?))`);args.push(JSON.stringify(selectedIds));}
  if(input.whitelistMode&&input.whitelistMode!=='all'&&!input.taskId)throw Error('白名单查询需要指定任务');
  if(input.taskId){
-  const history=input.runId?store.getRun(input.runId):undefined;
-  const task=history?.taskId===input.taskId?history.taskSnapshot:store.getTask(input.taskId);
-  if(!task)throw Error('任务不存在');
+  let task:AlertTask|MonitorTask|undefined;
+  let source:Pick<CollectionTask,'scope'|'productIds'>;
+  if(input.runId){
+   const history=store.getRun(input.runId);if(!history)throw Error('采集批次不存在');
+   task=history.alertTaskSnapshots?.find(snapshot=>snapshot.id===input.taskId&&snapshot.collectionTaskId===history.taskId&&snapshot.shopId===history.shopId);
+   // Existing reports retain their original combined-task snapshot after migration.
+   if(!task&&(!history.trigger||history.trigger==='legacy')&&history.taskId===input.taskId&&isLegacyMonitorTask(history.taskSnapshot))task=history.taskSnapshot;
+   if(!task)throw Error('该采集批次没有此预警任务的历史快照');
+   source=history;
+  }else{
+   task=store.getAlertTask(input.taskId);if(!task)throw Error('预警任务不存在');
+   const collection=store.getTask(task.collectionTaskId);if(!collection)throw Error('关联采集任务不存在');
+   source=collection;
+  }
   groups=input.groups??task.rules;
   where.push('p.shop_id=?');args.push(task.shopId);
-  if(task.scope==='selected'){where.push('p.product_id IN(SELECT value FROM json_each(?))');args.push(JSON.stringify(task.productIds));}
+  // An alert scope can narrow its source collection, but cannot add uncollected products.
+  for(const scope of [source,task])if(scope.scope==='selected'){where.push('p.product_id IN(SELECT value FROM json_each(?))');args.push(JSON.stringify(scope.productIds));}
   if(input.whitelistMode&&input.whitelistMode!=='all'){where.push(`whitelist_hit(p.payload,?)=${input.whitelistMode==='excluded'?1:0}`);args.push(JSON.stringify(task.whitelist));}
  }
  if(input.runId){where.push('p.run_id=?');args.push(input.runId);}

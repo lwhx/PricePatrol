@@ -1,12 +1,13 @@
 import {afterEach,describe,expect,it} from 'vitest';
 import {Store,type RunRecord} from '../src/database.js';
-import type {Shop,MonitorTask,CollectedRow,RuleGroup,PriceRow,ProductRow} from '../../shared/contracts.js';
+import type {Shop,MonitorTask,AlertTask,CollectedRow,RuleGroup,PriceRow,ProductRow} from '../../shared/contracts.js';
 const KEY='repository-test-key-at-least-thirty-two-characters';
 const shop=(id='s1'):Shop=>({id,name:id,sellerId:`seller-${id}`,platform:'tmall',enabled:true,sessionStatus:'valid',lastVerifiedAt:null,lastError:null,createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',hasCookies:false});
 const task=(id='t1',shopId='s1'):MonitorTask=>({id,shopId,name:id,enabled:true,scope:'all',productIds:[],rules:[],whitelist:{productIds:[],titleKeywords:[]},schedule:{kind:'manual',time:'09:00',days:[],timezone:'Asia/Shanghai'},notify:false,version:1,createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',nextRunAt:null});
 const run=(id='r1',shopId='s1',taskId:string|null='t1'):RunRecord=>({id,shopId,taskId,taskName:taskId||'',shopName:shopId,status:'running',scope:'all',productIds:[],expected:0,processed:0,failed:0,rows:0,checked:0,excluded:0,matched:0,unknown:0,message:'',createdAt:'2026-01-01T00:00:00Z',startedAt:'2026-01-01T00:00:00Z',finishedAt:null,parentRunId:null,failedProductIds:[],notificationStatus:'pending',taskSnapshot:taskId?task(taskId,shopId):null});
 const row=(productId='1000001',skuId='2000001',patch:Partial<CollectedRow>={}):CollectedRow=>({shopId:'s1',productId,skuId,title:'沙发',specs:'三人位 米白',seatSpec:'三人位',color:'米白',backendPrice:'100.00',before:'100.00',after:'85.00',backendVerified:true,status:'ok',sourceUrl:`https://detail.tmall.com/item.htm?id=${productId}`,backendSource:'seller',detailFetchedAt:'2026-01-01T00:00:00Z',backendFetchedAt:'2026-01-01T00:00:00Z',stock:3,...patch});
-function seed(store:Store){store.saveShop(shop());store.saveTask(task());store.saveRun(run());}
+const alertTask=(value:MonitorTask):AlertTask=>{const {schedule:_,nextRunAt:__,...alert}=value;return {...alert,collectionTaskId:value.id};};
+function seed(store:Store){store.saveShop(shop());store.saveTask(task());store.saveAlertTask(alertTask(task()));store.saveRun(run());}
 
 const stores:Store[]=[];afterEach(()=>{stores.splice(0).forEach(s=>s.close());});
 function fixture(){const s=new Store(':memory:',KEY);stores.push(s);seed(s);return s;}
@@ -34,7 +35,7 @@ describe('SQL price queries',()=>{
   expect(s.query({view:'product',sort:'minDiscount',order:'asc'}).rows.map(r=>r.productId)).toEqual(['1000002','1000001']);
  });
  it('loads task rules and isolated whitelists with historical task snapshots',()=>{
-  const s=fixture();s.saveTask({...task(),rules:discount('lt'),whitelist:{productIds:['1000001'],titleKeywords:[]}});s.saveTask({...task('t2'),rules:discount('eq'),whitelist:{productIds:[],titleKeywords:['自由岛']}});
+  const s=fixture();s.saveAlertTask(alertTask({...task(),rules:discount('lt'),whitelist:{productIds:['1000001'],titleKeywords:[]}}));s.saveTask(task('t2'));s.saveAlertTask(alertTask({...task('t2'),rules:discount('eq'),whitelist:{productIds:[],titleKeywords:['自由岛']}}));
   s.saveProduct('r1',{productId:'1000001',title:'沙发',rows:[row('1000001','a',{after:'80'})]});s.saveProduct('r1',{productId:'1000002',title:'自由岛',rows:[row('1000002','b',{title:'自由岛'})]});
   expect(s.query({taskId:'t1',whitelistMode:'excluded'}).rows.map(r=>r.productId)).toEqual(['1000001']);expect(s.query({taskId:'t1',whitelistMode:'included'}).total).toBe(0);
   expect(s.query({taskId:'t2',whitelistMode:'excluded'}).rows.map(r=>r.productId)).toEqual(['1000002']);expect(s.query({taskId:'t1',groups:[],whitelistMode:'included'}).rows.map(r=>r.productId)).toEqual(['1000002']);
