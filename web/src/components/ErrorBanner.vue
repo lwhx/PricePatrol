@@ -1,0 +1,1 @@
+<script setup lang="ts">defineProps<{ message?: string }>();</script><template><el-alert v-if="message" class="error-banner" :title="message" type="error" show-icon :closable="false" role="alert" /></template>

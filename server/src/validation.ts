@@ -1,0 +1,21 @@
+import {z} from 'zod';
+import {moneyCents} from './domain.js';
+const id=z.string().regex(/^\d{6,20}$/,'商品/SKU ID格式错误');
+const ids=z.array(id).max(20000);
+export const conditionSchema=z.object({field:z.enum(['discount','backendPrice','before','after','saving','priceDifference','title','specs','productId','skuId','status']),op:z.enum(['lt','lte','eq','ne','gte','gt','between','contains','notContains','in','notIn']),value:z.string().max(20000),upper:z.string().max(100).optional(),includeLower:z.boolean().optional(),includeUpper:z.boolean().optional()}).superRefine((value,ctx)=>{
+  const text=['title','specs','productId','skuId','status'].includes(value.field);
+  const allowed=text?['contains','notContains','eq','ne','in','notIn']:['lt','lte','eq','ne','gte','gt','between'];
+  if(!allowed.includes(value.op))ctx.addIssue({code:'custom',message:'字段不支持该比较方式'});
+  if(text)return;
+  for(const raw of [value.value,...(value.op==='between'?[value.upper||'']:[])]){const n=raw.trim().replace(/折$/,'');const cents=moneyCents(n.startsWith('-')?n.slice(1):n);if(cents===null||(value.field==='discount'&&(n.startsWith('-')||cents<=0||cents>1000)))ctx.addIssue({code:'custom',message:'价格或折扣条件无效，最多两位小数，折扣大于0且不超过10'});}
+  if(value.op==='between'&&Number(value.value.replace(/折$/,''))>Number((value.upper||'').replace(/折$/,'')))ctx.addIssue({code:'custom',message:'区间上限小于下限'});
+});
+export const groupSchema=z.object({mode:z.enum(['all','any']),conditions:z.array(conditionSchema).min(1).max(30)});
+export const whitelistSchema=z.object({productIds:ids.default([]),titleKeywords:z.array(z.string().trim().min(1).max(100)).max(1000).default([])});
+export const scheduleSchema=z.object({kind:z.enum(['manual','daily','weekly']),time:z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),days:z.array(z.number().int().min(0).max(6)).max(7),timezone:z.string().min(1).max(100)}).superRefine((s,ctx)=>{if(s.kind==='weekly'&&!s.days.length)ctx.addIssue({code:'custom',message:'每周任务需至少选择一天'});try{new Intl.DateTimeFormat('en',{timeZone:s.timezone});}catch{ctx.addIssue({code:'custom',message:'无效时区'});}});
+export const taskSchema=z.object({shopId:z.string().min(1),name:z.string().trim().min(1).max(100),enabled:z.boolean(),scope:z.enum(['all','selected']),productIds:ids,rules:z.array(groupSchema).min(1).max(10),whitelist:whitelistSchema,schedule:scheduleSchema,notify:z.boolean()}).superRefine((t,ctx)=>{if(t.scope==='selected'&&!t.productIds.length)ctx.addIssue({code:'custom',message:'指定商品任务至少需要一个商品ID'});});
+export const querySchema=z.object({shopIds:z.array(z.string()).max(100).optional(),groups:z.array(groupSchema).max(10).optional(),productIds:ids.optional(),skuIds:ids.optional(),search:z.string().max(200).optional(),runId:z.string().max(100).optional(),view:z.enum(['sku','product']).optional(),matchMode:z.enum(['any','all']).optional(),sort:z.string().max(50).optional(),order:z.enum(['asc','desc']).optional(),page:z.number().int().min(1).max(100000).optional(),pageSize:z.number().int().min(1).max(1000).optional(),from:z.string().datetime({offset:true}).optional(),to:z.string().datetime({offset:true}).optional(),taskId:z.string().max(100).optional(),whitelistMode:z.enum(['all','excluded','included']).optional()});
+export const cookieSchema=z.union([z.string().min(1).max(200000),z.array(z.object({name:z.string().min(1),value:z.string(),domain:z.string().optional(),path:z.string().optional(),expires:z.number().optional(),expirationDate:z.number().optional(),secure:z.boolean().optional(),httpOnly:z.boolean().optional(),sameSite:z.string().optional(),session:z.boolean().optional()})).min(1).max(1000)],{error:'Cookie 格式无效：请粘贴 k=v 形式的 Cookie 字符串，或包含 name、value 字段的 JSON 数组（domain 可选）'});
+export const appKeySchema=z.string().regex(/^[A-Za-z0-9_-]{1,100}$/, 'appKey 格式无效');
+export const accountSchema=z.object({name:z.string().trim().max(100).optional(),platform:z.enum(['tmall','taobao']),cookies:cookieSchema,userAgent:z.string().max(1000).optional(),appKey:appKeySchema.optional()});
+export const exportSchema=z.object({query:querySchema,scope:z.enum(['selected','page','all']),selectedIds:z.array(z.string()).max(20000).optional(),fields:z.array(z.string().max(40)).min(1).max(40),format:z.enum(['ids','titles','id-title','tsv','csv','text','json','markdown']),header:z.boolean(),allSkus:z.boolean().optional(),separator:z.string().max(10).optional()});

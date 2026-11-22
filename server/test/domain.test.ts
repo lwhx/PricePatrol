@@ -1,0 +1,14 @@
+import {describe,it,expect} from 'vitest';
+import {moneyCents,moneyText,compareDiscount,evaluateRules,whitelistReason,formatDiscount} from '../src/domain.js';
+import type {PriceRow} from '../../shared/contracts.js';
+const row={productId:'123456789012',skuId:'999999999999',title:'自由岛沙发',specs:'蓝色',backendPrice:'100.00',before:'100.00',after:'85.00',backendVerified:true,stale:false,status:'ok'} as PriceRow;
+describe('price and rules',()=>{
+it('formats integer cents without losing the last cent near the supported limit',()=>{expect(moneyText(9007199254740990)).toBe('90071992547409.90');expect(moneyText(9007199254740991)).toBe('90071992547409.91');expect(moneyText(-9007199254740991)).toBe('-90071992547409.91');expect(moneyText(null)).toBeNull();});
+it('keeps cents exact and rejects ranges, blank and unsafe values',()=>{expect(moneyCents('100.01')).toBe(10001);expect(moneyCents('')).toBeNull();expect(moneyCents('10~20')).toBeNull();expect(moneyCents('1.001')).toBeNull();expect(moneyCents('9999999999999999')).toBeNull();});
+it('uses exact cross multiplication for discount equality and strict less',()=>{expect(compareDiscount('100.00','85.00','lt','8.5')).toBe(false);expect(compareDiscount('100.00','85.00','eq','8.5折')).toBe(true);expect(compareDiscount('10000.00','8500.01','eq','8.5')).toBe(false);expect(compareDiscount('100.00','84.99','lt','8.5')).toBe(true);});
+it('unknown and zero baselines never mean normal',()=>{expect(compareDiscount('0','0','lt','8.5')).toBeNull();expect(evaluateRules({...row,stale:true},[{mode:'all',conditions:[{field:'discount',op:'lt',value:'8.5'}]}]).value).toBeNull();});
+it('does not need before-price for discount rule',()=>{expect(evaluateRules({...row,before:null,after:'80.00'},[{mode:'all',conditions:[{field:'discount',op:'lt',value:'8.5'}]}]).value).toBe(true);});
+it('AND/OR preserve unknown without hiding proven matches',()=>{const stale={...row,stale:true};expect(evaluateRules(stale,[{mode:'any',conditions:[{field:'discount',op:'lt',value:'8.5'},{field:'title',op:'contains',value:'自由岛'}]}]).value).toBe(true);expect(evaluateRules(stale,[{mode:'all',conditions:[{field:'discount',op:'lt',value:'8.5'},{field:'title',op:'contains',value:'普通'}]}]).value).toBe(false);});
+it('whitelist is task-local OR exact IDs or literal title substring',()=>{expect(whitelistReason(row,{productIds:[],titleKeywords:['自由岛']})).toContain('自由岛');expect(whitelistReason(row,{productIds:['123456789012'],titleKeywords:[]})).toContain('商品ID');expect(whitelistReason(row,{productIds:['123456'],titleKeywords:['.*','']})).toBeNull();});
+it('supports inclusive range boundaries and display only formatting',()=>{expect(compareDiscount('100','85','between','8','8.5')).toBe(true);expect(compareDiscount('100','85','between','8','8.5',true,false)).toBe(false);expect(formatDiscount('10000','8500.01')).toBe('8.5000');});
+});

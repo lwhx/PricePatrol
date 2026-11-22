@@ -1,0 +1,148 @@
+name: Verify and publish container
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          RUN_BROWSER_TESTS: '1'
+      - run: npm run test:ui
+      - run: npm run build
+      - name: Compose configuration validation (ephemeral key)
+        run: |
+          encryption_key=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
+          ENCRYPTION_KEY="$encryption_key" docker compose config --quiet
+
+  image:
+    needs: verify
+    # PRs verify source only. Publishing starts only after the user pushes to
+    # their repository or explicitly dispatches this workflow.
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Normalize image path
+        id: image
+        shell: bash
+        run: printf 'name=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Build native image for runtime checks
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: price-monitor-ci:local
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - name: Exercise Chromium and data directory in the built image
+        run: |
+          docker run --rm --init --shm-size=1g --entrypoint node price-monitor-ci:local --input-type=module -e '
+            import {chromium} from "playwright";
+            import {writeFileSync, unlinkSync} from "node:fs";
+            writeFileSync("/app/data/.write-probe", "ok");
+            unlinkSync("/app/data/.write-probe");
+            const browser = await chromium.launch({headless:true});
+            try {
+              const page = await browser.newPage();
+              await page.setContent("<html><body>登录依赖检查</body></html>");
+              const png = await page.screenshot({type:"png"});
+              if (png.readUInt32BE(0) !== 0x89504e47) throw new Error("Invalid PNG");
+            } finally { await browser.close(); }
+          '
+      - name: Exercise production node + tsx entrypoint
+        run: |
+          encryption_key=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
+          docker run --detach --init --name price-monitor-smoke --env ENCRYPTION_KEY="$encryption_key" price-monitor-ci:local
+          ready=false
+          for attempt in {1..30}; do
+            if docker exec price-monitor-smoke node -e "fetch('http://127.0.0.1:3000/api/auth/status',{signal:AbortSignal.timeout(2000)}).then(async r=>{const s=await r.json();if(!r.ok||s.configured!==false||s.authenticated!==false)process.exit(1)}).catch(()=>process.exit(1))"; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+      - name: Remove smoke container and its ephemeral data volume
+        if: always()
+        run: docker rm --force --volumes price-monitor-smoke 2>/dev/null || true
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push verified architecture image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker tag price-monitor-ci:local "$IMAGE:sha-${GITHUB_SHA}-${ARCH}"
+          docker push "$IMAGE:sha-${GITHUB_SHA}-${ARCH}"
+
+  manifest:
+    needs: image
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - name: Normalize image path
+        id: image
+        shell: bash
+        run: printf 'name=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Merge only after both native images passed runtime checks
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          IS_DEFAULT_BRANCH: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        run: |
+          tags=(--tag "$IMAGE:sha-${GITHUB_SHA}")
+          if [ "$IS_DEFAULT_BRANCH" = true ]; then tags+=(--tag "$IMAGE:latest"); fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tags+=(--tag "$IMAGE:$GITHUB_REF_NAME"); fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE:sha-${GITHUB_SHA}-amd64" "$IMAGE:sha-${GITHUB_SHA}-arm64"
+          docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA}"

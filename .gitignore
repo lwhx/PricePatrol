@@ -1,0 +1,17 @@
+node_modules/
+web/dist/
+data/
+.local/
+.env
+.env.*
+!.env.example
+*.sqlite*
+*.db
+*.log
+coverage/
+playwright-report/
+test-results/
+.encryption-key
+*.pem
+*.key
+taobao-cookies-*.json
