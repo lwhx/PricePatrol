@@ -10,6 +10,10 @@ RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
+LABEL org.opencontainers.image.title="价巡 PricePatrol" \
+      org.opencontainers.image.description="多店铺淘宝/天猫 SKU 价格监控：Cookie 采集、折扣预警、多任务调度" \
+      org.opencontainers.image.source="https://github.com/lwhx/PricePatrol" \
+      org.opencontainers.image.licenses="UNLICENSED"
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \

@@ -1,0 +1,54 @@
+# 价巡 PricePatrol 部署文件
+#
+# 只需要本目录三个文件即可在 Linux 上运行，不必克隆整个仓库、也不在服务器上构建：
+#   deploy/compose.yaml  deploy/.env.example
+# 以及你自己生成的 .env（不要提交）。
+#
+# 1) cp deploy/.env.example deploy/.env  然后填 ENCRYPTION_KEY
+#    生成密钥：openssl rand -hex 32
+# 2) docker compose -f deploy/compose.yaml --env-file deploy/.env pull
+# 3) docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
+#
+# 默认只监听 127.0.0.1:3000；远程访问请用 SSH 隧道
+# 或前面加 HTTPS 反向代理（此时把 COOKIE_SECURE 设为 true）。
+
+name: pricepatrol
+
+services:
+  app:
+    # 建议固定已通过 CI 的 sha- 标签，避免 latest 自动漂移。
+    # 公开镜像：ghcr.io/lwhx/pricepatrol:latest
+    # 私有镜像需先 docker login ghcr.io
+    image: ${IMAGE:-ghcr.io/lwhx/pricepatrol:latest}
+    # 部署文件在 deploy/ 下，镜像已包含前端与后端，因此不需要 build。
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    shm_size: 1gb
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /app/data
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?请先在 .env 配置持久 ENCRYPTION_KEY}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - pricepatrol-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/auth/status',{signal:AbortSignal.timeout(4000)}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  pricepatrol-data:
+    name: ${DATA_VOLUME:-pricepatrol-data}

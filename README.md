@@ -101,11 +101,11 @@ docker compose ps
 
 默认仅将 `127.0.0.1:3000` 映射至宿主机。可通过 SSH 隧道访问，或用 HTTPS 反向代理转发；HTTPS 访问时设置 `COOKIE_SECURE=true` 并重新创建容器。需要内网直连时设置 `BIND_ADDRESS` 为适当网卡地址。首次访问设置管理员密码，升级时保留原数据卷与密钥。
 
-Dockerfile 先 `npm ci` 构建前端，运行阶段 `npm ci --omit=dev` 后调用**锁定的本地 Playwright CLI**安装 Chromium 及 Debian 系统依赖。采用 `node:24-bookworm-slim`，避开 Playwright npm 版本范围与预制浏览器镜像版本不一致的问题。生产入口为 `node --import tsx server/src/main.ts`，以 `node` 用户运行，镜像内含中文字体。Compose 提供 init、1 GiB 共享内存、健康检查和日志轮转。
+Dockerfile 先 `npm ci` 构建前端，运行阶段 `npm ci --omit=dev` 后调用**锁定的本地 Playwright CLI**安装 Chromium 及 Debian 系统依赖。采用 `node:24-bookworm-slim`，避开 Playwright npm 版本范围与预制浏览器镜像版本不一致的问题。生产入口为 `node --import tsx server/src/main.ts`，以 `node` 用户运行，镜像内含中文字体 `fonts-noto-cjk`。Compose 提供 init、1 GiB 共享内存、健康检查和日志轮转；镜像带 OCI 标签，指向本仓库。
 
-容器内数据目录 `/app/data` 使用命名卷，默认名 `price-monitor-data`，可用 `.env` 的 `DATA_VOLUME` 更改。`docker compose down` 保留数据卷；`down -v` 会删除数据，请勿用于普通升级。更换挂载目录时需保证 UID/GID 1000 可写。
+容器内数据目录 `/app/data` 使用命名卷，默认名 `pricepatrol-data`，可用 `.env` 的 `DATA_VOLUME` 更改。从更早版本升级、数据仍在 `price-monitor-data` 卷时，把 `DATA_VOLUME` 写成旧卷名即可继续读取，无需迁移数据。`docker compose down` 保留数据卷；`down -v` 会删除数据，请勿用于普通升级。更换挂载目录时需保证 UID/GID 1000 可写。
 
-当前开发机没有 Docker，未在此机执行镜像构建或 Linux 容器运行验证。工作流中的原生镜像检查需用户推送 GitHub 后实际跑通，再确认目标部署。
+本机开发环境没有 Docker。以上配置与工作流中的镜像检查已在 GitHub Actions 的 `ubuntu-24.04`（amd64）和 `ubuntu-24.04-arm`（arm64）实际跑通：容器内 Chromium 截图、数据目录可写、生产入口初始化状态均通过。目标 Linux 主机的网络出口与平台账号仍需自行验收。
 
 ## GitHub / GHCR 镜像
 
@@ -117,26 +117,35 @@ Dockerfile 先 `npm ci` 构建前端，运行阶段 `npm ci --omit=dev` 后调�
 
 生成标签包括 `sha-<完整提交SHA>`、架构标签 `sha-<SHA>-amd64`/`-arm64`，默认分支额外更新 `latest`，版本推送保留 `v…` 标签。部署建议固定已通过检查的 SHA 标签。发布流程未由本机代用户触发。
 
-Linux 服务器取得 `compose.yaml` 和 `.env.example` 后，在 `.env` 中设置：
+### 只拉镜像部署（推荐）
 
-```dotenv
-IMAGE=ghcr.io/你的全小写用户名/你的全小写仓库名:sha-完整提交SHA
-ENCRYPTION_KEY=首次生成后妥善保留的随机密钥
-DATA_VOLUME=price-monitor-data
-BIND_ADDRESS=127.0.0.1
-APP_PORT=3000
-COOKIE_SECURE=false
-```
-
-然后拉取并启动，不进行源码构建：
+服务器不必克隆仓库，只需要 `deploy/` 下的三个文件：
 
 ```bash
-docker compose pull app
-docker compose up -d --no-build
-docker compose ps
+# 从仓库取得部署文件（或直接复制这三个文件到服务器同一目录）
+curl -fsSLO https://raw.githubusercontent.com/lwhx/PricePatrol/main/deploy/compose.yaml
+curl -fsSL https://raw.githubusercontent.com/lwhx/PricePatrol/main/deploy/.env.example -o .env.example
+
+cp .env.example .env
+# 编辑 .env：至少填 ENCRYPTION_KEY；需要时改 IMAGE / BIND_ADDRESS / APP_PORT
+chmod 600 .env
+
+docker compose --env-file .env pull
+docker compose --env-file .env up -d
+docker compose --env-file .env ps
 ```
 
-后续升级修改 `IMAGE` 后重复上述命令，保留同一数据卷和 `ENCRYPTION_KEY`。网络和平台账号验收必须在目标 Linux 出口重新执行。
+已在同一目录放好 `compose.yaml` 时，`--env-file` 可省略。默认镜像为 `ghcr.io/lwhx/pricepatrol:latest`；建议改成已通过检查的 `sha-<完整提交SHA>` 固定版本，升级时改 `IMAGE` 再执行一次 `pull` 和 `up -d`。
+
+若镜像包为私有，先在本机登录：
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u 你的GitHub用户名 --password-stdin
+```
+
+`GHCR_TOKEN` 需要 `read:packages` 权限。公开仓库的镜像默认可匿名拉取。数据卷与 `ENCRYPTION_KEY` 在升级时必须保留；网络和平台账号验收必须在目标 Linux 出口重新执行。
+
+也可以继续使用仓库根目录的 `compose.yaml` 在服务器上源码构建，两种方式使用同一数据卷约定，可互相切换。
 
 ## 备份与恢复
 
@@ -145,9 +154,9 @@ docker compose ps
 也可以在 Linux **停止应用后**备份整个数据卷。例如默认卷名：
 
 ```bash
-mkdir -p ../price-monitor-backups
+mkdir -p ../pricepatrol-backups
 docker compose stop app
-docker run --rm -v price-monitor-data:/source:ro -v "$PWD/../price-monitor-backups:/backup" alpine:3.22 tar -C /source -czf /backup/data.tar.gz .
+docker run --rm -v pricepatrol-data:/source:ro -v "$PWD/../pricepatrol-backups:/backup" alpine:3.22 tar -C /source -czf /backup/data.tar.gz .
 docker compose start app
 ```
 
@@ -157,8 +166,8 @@ docker compose start app
 
 ```bash
 docker compose stop app
-docker volume create price-monitor-data-restored
-docker run --rm -v price-monitor-data-restored:/target -v "$PWD/../price-monitor-backups:/backup:ro" alpine:3.22 sh -c 'tar -C /target -xzf /backup/data.tar.gz && chown -R 1000:1000 /target'
+`docker volume create pricepatrol-data-restored`
+docker run --rm -v pricepatrol-data-restored:/target -v "$PWD/../pricepatrol-backups:/backup:ro" alpine:3.22 sh -c 'tar -C /target -xzf /backup/data.tar.gz && chown -R 1000:1000 /target'
 ```
 
-在 `.env` 中改 `DATA_VOLUME=price-monitor-data-restored`，恢复该备份配套的原 `ENCRYPTION_KEY`，确认应用版本兼容，再执行 `docker compose up -d --no-build`。验证管理员登录、店铺与预警数据、账号会话后再处理旧卷；旧卷仍保留，可用于回退。已失效的商家会话需要用户重新登录。
+在 `.env` 中改 `DATA_VOLUME=pricepatrol-data-restored`，恢复该备份配套的原 `ENCRYPTION_KEY`，确认应用版本兼容，再执行 `docker compose up -d --no-build`。验证管理员登录、店铺与预警数据、账号会话后再处理旧卷；旧卷仍保留，可用于回退。已失效的商家会话需要用户重新登录。
