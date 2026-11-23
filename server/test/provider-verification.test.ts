@@ -24,13 +24,14 @@ it.each([
 ])('recognizes marketplace verification challenges rather than misleading users to wait for a rate limit: %j', async (...codes: string[]) => {
   const { collector, calls } = challenge(codes);
   await expect(collector.verify(credentials)).rejects.toMatchObject({ code: 'VERIFICATION_REQUIRED' });
-  expect(calls()).toBe(1);
+  // One listing call on the chosen platform plus a single probe on the other platform.
+  expect(calls()).toBe(2);
 });
 
 it('recognizes a nested business verification challenge without exposing its remote text', async () => {
   const { collector, calls } = challenge(['RGV587_ERROR'], true);
   await expect(collector.verify(credentials)).rejects.toMatchObject({ code: 'VERIFICATION_REQUIRED' });
-  expect(calls()).toBe(1);
+  expect(calls()).toBe(2);
 });
 
 it('keeps true marketplace traffic limits distinct from security verification', async () => {
@@ -68,6 +69,6 @@ it('returns an actionable verification instruction when adding an account, witho
     expect(response.body).not.toContain('限流');
     expect(response.body).not.toContain('fixture-private-token');
     expect(store.listShops()).toEqual([]);
-    expect(calls()).toBe(1);
+    expect(calls()).toBe(2);
   } finally { await app.close(); store.close(); }
 });

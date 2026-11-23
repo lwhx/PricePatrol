@@ -1,4 +1,4 @@
-import type { Collector, CollectOptions, CollectedRow } from '../../../shared/contracts.js';
+import type { AccountCredentials, Collector, CollectOptions, CollectedRow, Platform, VerifiedAccount } from '../../../shared/contracts.js';
 import { exportCookies } from './cookies.js';
 import { checkAbort, CollectorError } from './errors.js';
 import { Client, backend, fail, fatal, pageInvariant, platforms, validId, type Page, type CollectorConfiguration } from './client.js';
@@ -36,14 +36,45 @@ async function findVerificationProduct(client: Client, signal: AbortSignal): Pro
 }
 
 export function createCollector(configuration: CollectorConfiguration = {}): Collector {
+    async function attempt(credentials: Parameters<Collector['verify']>[0], signal: AbortSignal): Promise<VerifiedAccount> {
+        const client = new Client(credentials, configuration);
+        const productId = await findVerificationProduct(client, signal);
+        const detail = await client.detail(productId, signal);
+        client.http.assertIdentity();
+        checkAbort(signal);
+        return { ...detail.identity, platform: client.platform.id, cookies: exportCookies(client.http.jar), userAgent: client.http.userAgent, appKey: client.appKey };
+    }
+    // A cookie only works against its own platform's management API: pointing a Tmall cookie at
+    // the Taobao API returns a security challenge the user cannot resolve by verifying. When we
+    // see that challenge, ask the other platform once (a single listing page) to tell a genuinely
+    // challenged session apart from a valid cookie imported under the wrong platform.
+    async function otherPlatformAccepts(credentials: AccountCredentials, signal: AbortSignal): Promise<Platform | null> {
+        const alternative: Platform = credentials.platform === 'tmall' ? 'taobao' : 'tmall';
+        try {
+            await new Client({ ...credentials, platform: alternative }, configuration).page('on_sale', 1, 100, signal);
+            return alternative;
+        }
+        catch (error) {
+            if (error instanceof CollectorError && error.code === 'ABORTED')
+                throw error;
+            return null;
+        }
+    }
     return {
         async verify(credentials, signal = new AbortController().signal) {
-            const client = new Client(credentials, configuration);
-            const productId = await findVerificationProduct(client, signal);
-            const detail = await client.detail(productId, signal);
-            client.http.assertIdentity();
-            checkAbort(signal);
-            return { ...detail.identity, platform: client.platform.id, cookies: exportCookies(client.http.jar), userAgent: client.http.userAgent, appKey: client.appKey };
+            try {
+                return await attempt(credentials, signal);
+            }
+            catch (error) {
+                if (!(error instanceof CollectorError) || error.code !== 'VERIFICATION_REQUIRED')
+                    throw error;
+                const other = await otherPlatformAccepts(credentials, signal);
+                if (!other)
+                    throw error;
+                checkAbort(signal);
+                const label = platforms.byId(other)?.label ?? other;
+                throw new CollectorError('PLATFORM_MISMATCH', `这份 Cookie 属于${label}店铺：请把平台切换为${label}后重新导入`);
+            }
         },
         async collect(options) { return collect(options, configuration); }
     };
