@@ -2,9 +2,9 @@ import type {IncidentEvent,NotificationPolicy} from './incidents.js';
 export type Platform = 'taobao' | 'tmall';
 export interface CookieRecord {name:string;value:string;domain?:string;path?:string;expires?:number;expirationDate?:number;secure?:boolean;httpOnly?:boolean;sameSite?:string;session?:boolean}
 export type CookieInput = string | CookieRecord[];
-export interface AccountCredentials {cookies:CookieInput;platform:Platform;userAgent?:string;appKey?:string}
-export interface VerifiedAccount {sellerId:string;shopName:string;platform:Platform;cookies:CookieRecord[];userAgent:string;appKey:string}
-export interface Shop {id:string;name:string;sellerId:string;platform:Platform;enabled:boolean;sessionStatus:string;lastVerifiedAt:string|null;lastError:string|null;createdAt:string;updatedAt:string;hasCookies:boolean;/** Present only on removed accounts; the row is kept so historical prices, runs and alerts stay queryable. */archivedAt?:string|null}
+export interface AccountCredentials {cookies:CookieInput;platform:Platform;userAgent?:string;appKey?:string;proxy?:string}
+export interface VerifiedAccount {sellerId:string;shopName:string;platform:Platform;cookies:CookieRecord[];userAgent:string;appKey:string;proxy?:string}
+export interface Shop {id:string;name:string;sellerId:string;platform:Platform;enabled:boolean;sessionStatus:string;lastVerifiedAt:string|null;lastError:string|null;createdAt:string;updatedAt:string;hasCookies:boolean;hasProxy?:boolean;/** Present only on removed accounts; the row is kept so historical prices, runs and alerts stay queryable. */archivedAt?:string|null}
 export type Compare = 'lt'|'lte'|'eq'|'ne'|'gte'|'gt'|'between';
 export type RuleField = 'discount'|'backendPrice'|'before'|'after'|'saving'|'priceDifference'|'title'|'specs'|'productId'|'skuId'|'status';
 export interface Condition {field:RuleField;op:Compare|'contains'|'notContains'|'in'|'notIn';value:string;upper?:string;includeLower?:boolean;includeUpper?:boolean}

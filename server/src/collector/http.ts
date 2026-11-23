@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { request } from 'undici';
+import { request, type Dispatcher } from 'undici';
 import { Cookie, type CookieJar } from 'tough-cookie';
 import { allowedDomain } from './cookies.js';
 import { checkAbort, CollectorError } from './errors.js';
@@ -8,6 +8,7 @@ export interface HttpRequest {
     headers: Record<string, string>;
     body?: string;
     signal: AbortSignal;
+    dispatcher?: Dispatcher;
 }
 export interface HttpResponse {
     status: number;
@@ -111,7 +112,7 @@ async function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 export const defaultHttpTransport: HttpTransport = async (url, init) => {
-    const response = await request(url, { method: init.method, headers: init.headers, body: init.body, signal: init.signal, headersTimeout: 25000, bodyTimeout: 25000 });
+    const response = await request(url, { method: init.method, headers: init.headers, body: init.body, signal: init.signal, headersTimeout: 25000, bodyTimeout: 25000, dispatcher: init.dispatcher });
     let size = 0;
     const chunks: Buffer[] = [];
     for await (const chunk of response.body) {
@@ -129,7 +130,7 @@ export const defaultHttpTransport: HttpTransport = async (url, init) => {
 };
 export class SessionHttp {
     private readonly principal: string;
-    constructor(readonly jar: CookieJar, readonly userAgent: string, private readonly transport: HttpTransport, private readonly limiter: RequestLimiter, private readonly timeoutMs: number) {
+    constructor(readonly jar: CookieJar, readonly userAgent: string, private readonly transport: HttpTransport, private readonly limiter: RequestLimiter, private readonly timeoutMs: number, private readonly dispatcher?: Dispatcher, private readonly interrupt?: () => void) {
         this.principal = this.currentPrincipal();
     }
     private currentPrincipal(): string { return this.jar.getCookiesSync('https://h5api.m.taobao.com/h5/').filter(c => c.key === 'unb').map(c => c.value).join('|'); }
@@ -177,9 +178,12 @@ export class SessionHttp {
             this.assertIdentity();
             const timeout = AbortSignal.timeout(this.timeoutMs);
             const combined = AbortSignal.any([signal, timeout]);
+            const interrupt = () => this.interrupt?.();
+            combined.addEventListener('abort', interrupt, {once:true});
+            if (combined.aborted) interrupt();
             let response: HttpResponse;
             try {
-                response = await this.transport(url, { method: init.method, body: init.body, signal: combined, headers: {
+                response = await this.transport(url, { method: init.method, body: init.body, signal: combined, dispatcher: this.dispatcher, headers: {
                         'User-Agent': this.userAgent, 'Accept': init.accept ?? 'application/json', 'Accept-Language': 'zh-CN,zh;q=0.9', 'Origin': 'https://qn.taobao.com', 'Referer': 'https://qn.taobao.com/',
                         ...(init.body ? { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' } : {}), Cookie: this.jar.getCookieStringSync(url)
                     } });
@@ -192,6 +196,7 @@ export class SessionHttp {
                 const timedOut = timeout.aborted || /^UND_ERR_.*TIMEOUT$/.test(code ?? '');
                 throw new CollectorError(timedOut ? 'TIMEOUT' : 'NETWORK_ERROR', timedOut ? '请求超时，请稍后重试' : '采集网络请求失败，请检查出口连接');
             }
+            finally { combined.removeEventListener('abort', interrupt); }
             checkAbort(signal);
             checkAbort(timeout);
             const finalUrl = response.url ?? url;

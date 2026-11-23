@@ -37,12 +37,16 @@ async function findVerificationProduct(client: Client, signal: AbortSignal): Pro
 
 export function createCollector(configuration: CollectorConfiguration = {}): Collector {
     async function attempt(credentials: Parameters<Collector['verify']>[0], signal: AbortSignal): Promise<VerifiedAccount> {
-        const client = new Client(credentials, configuration);
-        const productId = await findVerificationProduct(client, signal);
-        const detail = await client.detail(productId, signal);
-        client.http.assertIdentity();
-        checkAbort(signal);
-        return { ...detail.identity, platform: client.platform.id, cookies: exportCookies(client.http.jar), userAgent: client.http.userAgent, appKey: client.appKey };
+        const client = new Client(credentials, configuration, signal);
+        try {
+            const productId = await findVerificationProduct(client, signal);
+            const detail = await client.detail(productId, signal);
+            client.http.assertIdentity();
+            checkAbort(signal);
+            return { ...detail.identity, platform: client.platform.id, cookies: exportCookies(client.http.jar), userAgent: client.http.userAgent, appKey: client.appKey, ...(client.proxy ? {proxy:client.proxy} : {}) };
+        } finally {
+            await client.close();
+        }
     }
     // A cookie only works against its own platform's management API: pointing a Tmall cookie at
     // the Taobao API returns a security challenge the user cannot resolve by verifying. When we
@@ -50,14 +54,18 @@ export function createCollector(configuration: CollectorConfiguration = {}): Col
     // challenged session apart from a valid cookie imported under the wrong platform.
     async function otherPlatformAccepts(credentials: AccountCredentials, signal: AbortSignal): Promise<Platform | null> {
         const alternative: Platform = credentials.platform === 'tmall' ? 'taobao' : 'tmall';
+        const client = new Client({ ...credentials, platform: alternative }, configuration, signal);
         try {
-            await new Client({ ...credentials, platform: alternative }, configuration).page('on_sale', 1, 20, signal);
+            await client.page('on_sale', 1, 20, signal);
             return alternative;
         }
         catch (error) {
             if (error instanceof CollectorError && error.code === 'ABORTED')
                 throw error;
             return null;
+        }
+        finally {
+            await client.close();
         }
     }
     return {
@@ -80,8 +88,15 @@ export function createCollector(configuration: CollectorConfiguration = {}): Col
     };
 }
 async function collect(options: CollectOptions, configuration: CollectorConfiguration) {
+    const client = new Client(options.credentials, configuration, options.signal);
+    try {
+        return await collectWithClient(options, client);
+    } finally {
+        await client.close();
+    }
+}
+async function collectWithClient(options: CollectOptions, client: Client) {
     const { signal, credentials } = options;
-    const client = new Client(credentials, configuration);
     const selected = options.productIds === undefined ? undefined : [...new Set(options.productIds)];
     const skip = new Set(options.skipProductIds ?? []);
     if (selected?.some(id => !validId(id)) || [...skip].some(id => !validId(id)))

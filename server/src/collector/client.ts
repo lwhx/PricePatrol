@@ -3,6 +3,8 @@ import { createRequire } from 'node:module';
 import type { AccountCredentials, Platform } from '../../../shared/contracts.js';
 import { importCookies } from './cookies.js';
 import { checkAbort, CollectorError } from './errors.js';
+import { accountProxy } from './proxy.js';
+
 import { defaultHttpTransport, globalLimiter, SessionHttp, type HttpTransport, type RequestLimiter } from './http.js';
 const require = createRequire(import.meta.url);
 export const core = require('./vendor/core.cjs');
@@ -154,17 +156,36 @@ export class Client {
     readonly http: SessionHttp;
     readonly platform: PlatformInfo;
     appKey: string;
-    constructor(readonly credentials: AccountCredentials, private readonly config: CollectorConfiguration) {
+    readonly proxy?: string;
+    private readonly disposeProxy?: () => Promise<void>;
+    private disposal?: Promise<void>;
+    private removeAbortListener?: () => void;
+    constructor(readonly credentials: AccountCredentials, private readonly config: CollectorConfiguration, signal?: AbortSignal) {
         this.platform = platforms.byId(credentials.platform);
         if (!this.platform)
             fail('PLATFORM_INVALID', '平台无效');
         const ua = credentials.userAgent?.trim() || DEFAULT_UA;
         if (/[\r\n]/.test(ua) || ua.length > 2000)
             fail('INVALID_CONFIGURATION', 'User-Agent 格式无效');
-        this.http = new SessionHttp(importCookies(credentials.cookies), ua, config.transport ?? defaultHttpTransport, config.limiter ?? globalLimiter, config.timeoutMs ?? 30000);
+        const jar = importCookies(credentials.cookies);
         this.appKey = credentials.appKey?.trim() ?? '';
         if (this.appKey && !/^[A-Za-z0-9_-]{1,100}$/.test(this.appKey))
             fail('INVALID_CONFIGURATION', 'appKey 格式无效');
+        const {proxy, dispatcher, close, interrupt} = accountProxy(credentials.proxy);
+        this.proxy = proxy;
+        this.disposeProxy = close;
+        this.http = new SessionHttp(jar, ua, config.transport ?? defaultHttpTransport, config.limiter ?? globalLimiter, config.timeoutMs ?? 30000, dispatcher, interrupt);
+        if (signal && dispatcher) {
+            const abort = () => { void this.close().catch(() => {}); };
+            signal.addEventListener('abort', abort, {once:true});
+            this.removeAbortListener = () => signal.removeEventListener('abort', abort);
+            if (signal.aborted) abort();
+        }
+    }
+    close(): Promise<void> {
+        this.removeAbortListener?.();
+        // The operation has finished: destroy also terminates sockets left by an aborted request.
+        return this.disposal ??= this.disposeProxy?.() ?? Promise.resolve();
     }
     stamp(): string { return new Date((this.config.now ?? Date.now)()).toISOString(); }
     async ensureKey(signal: AbortSignal): Promise<void> {

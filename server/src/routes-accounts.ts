@@ -2,7 +2,8 @@ import {randomUUID} from 'node:crypto';
 import type {RouteShorthandOptions} from 'fastify';
 import {z} from 'zod';
 import type {AccountCredentials,VerifiedAccount,Shop} from '../../shared/contracts.js';
-import {accountSchema,cookieSchema,appKeySchema} from './validation.js';
+import {accountSchema,cookieSchema,appKeySchema,accountProxySchema} from './validation.js';
+import {normalizeAccountProxy} from '../../shared/account-proxy.js';
 import {HttpError,publicRun,requireValue,type ApiContext} from './api-context.js';
 import type {RunRecord} from './database.js';
 import {CollectorError,isInvalidCredentialCode} from './collector/errors.js';
@@ -20,6 +21,7 @@ const verificationMessages:Partial<Record<string,string>>={
   ABORTED:'核验已停止：请稍后重试',
   TIMEOUT:'核验超时：请稍后重试',
   NETWORK_ERROR:'店铺核验连接失败：请检查服务器网络或稍后重试',
+  INVALID_CONFIGURATION:'连接配置无效：请检查代理协议、主机、端口和认证信息',
   HTTP_ERROR:'平台接口暂时无法完成核验：请稍后重试',
 };
 class VerificationError extends HttpError{
@@ -35,13 +37,20 @@ const verificationRoute:RouteShorthandOptions={
 export function registerAccounts(ctx:ApiContext):void{
   const {app,store,collector,browser}=ctx;
   async function verify(input:AccountCredentials):Promise<VerifiedAccount>{
-    try{return await collector.verify(input,AbortSignal.timeout(60000));}
+    try{
+      const proxy=normalizeAccountProxy(input.proxy);
+      const account=await collector.verify({...input,proxy},AbortSignal.timeout(60000));
+      return {...account,proxy};
+    }
     catch(error){
       const code=error instanceof Error&&'code' in error?error.code:undefined;
       const message=typeof code==='string'&&Object.hasOwn(verificationMessages,code)?verificationMessages[code]:undefined;
       if(typeof code!=='string'||(!message&&!isInvalidCredentialCode(code)&&!(error instanceof CollectorError)))throw error;
       throw new VerificationError(code,message??'店铺验证失败，请确认 Cookie 完整、平台正确且有商品读取权限');
     }
+  }
+  function publicShop(shop:Shop):Shop{
+    return {...shop,hasProxy:shop.hasCookies&&Boolean(store.getCredentials(shop.id).proxy)};
   }
   function credentialVersions(platform:AccountCredentials['platform']){
     // Snapshot every row of the platform, including removed accounts: a verification that
@@ -67,12 +76,12 @@ export function registerAccounts(ctx:ApiContext):void{
       // Re-importing the same shop restores the removed account: same identity and history, versioned credentials.
       const shop:Shop={id:prior?.id||randomUUID(),name:options.name||prior?.name||account.shopName,sellerId:account.sellerId,platform:account.platform,enabled:options.enabled??(prior?.archivedAt?true:prior?.enabled??true),sessionStatus:'valid',lastVerifiedAt:at,lastError:null,createdAt:prior?.createdAt||at,updatedAt:at,hasCookies:true,archivedAt:null};
       store.saveShop(shop,account);
-      return shop;
+      return {...shop,hasProxy:Boolean(account.proxy)};
     });
   }
   app.get('/api/shops',async request=>{
     const include=z.object({includeArchived:z.enum(['true','false']).optional().transform(value=>value==='true')}).parse(request.query);
-    return {shops:[...store.listShops(),...(include.includeArchived?store.listArchivedShops():[])]};
+    return {shops:[...store.listShops(),...(include.includeArchived?store.listArchivedShops():[])].map(publicShop)};
   });
   app.post('/api/shops',verificationRoute,async request=>{
     const input=accountSchema.parse(request.body);
@@ -81,8 +90,8 @@ export function registerAccounts(ctx:ApiContext):void{
   });
   app.patch<{Params:{id:string}}>('/api/shops/:id',verificationRoute,async request=>{
     const {id}=request.params;
-    const input=z.object({name:z.string().trim().min(1).max(100).optional(),enabled:z.boolean().optional(),cookies:cookieSchema.optional(),userAgent:z.string().max(1000).optional(),appKey:appKeySchema.optional()}).parse(request.body);
-    if(input.cookies||input.userAgent||input.appKey){
+    const input=z.object({name:z.string().trim().min(1).max(100).optional(),enabled:z.boolean().optional(),cookies:cookieSchema.optional(),userAgent:z.string().max(1000).optional(),appKey:appKeySchema.optional(),proxy:accountProxySchema}).parse(request.body);
+    if(['cookies','userAgent','appKey','proxy'].some(key=>Object.hasOwn(input,key))){
       const {credentials,version}=credentialsFor(id);
       const account=await verify({...credentials,...input});
       return {shop:saveAccount(account,new Map([[id,version]]),{id,name:input.name,enabled:input.enabled})};
@@ -92,7 +101,7 @@ export function registerAccounts(ctx:ApiContext):void{
       if(prior.archivedAt)throw new HttpError(400,'店铺已移除，请重新导入账号');
       const shop={...prior,name:input.name||prior.name,enabled:input.enabled??prior.enabled,updatedAt:new Date().toISOString()};
       store.saveShop(shop);
-      return {shop};
+      return {shop:publicShop(shop)};
     });
   });
   app.delete<{Params:{id:string}}>('/api/shops/:id',async request=>{

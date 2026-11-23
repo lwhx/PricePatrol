@@ -1,5 +1,6 @@
 import {z} from 'zod';
 import {moneyCents} from './domain.js';
+import {normalizeAccountProxy} from '../../shared/account-proxy.js';
 const id=z.string().regex(/^\d{6,20}$/,'商品/SKU ID格式错误');
 const ids=z.array(id).max(20000);
 export const conditionSchema=z.object({field:z.enum(['discount','backendPrice','before','after','saving','priceDifference','title','specs','productId','skuId','status']),op:z.enum(['lt','lte','eq','ne','gte','gt','between','contains','notContains','in','notIn']),value:z.string().max(20000),upper:z.string().max(100).optional(),includeLower:z.boolean().optional(),includeUpper:z.boolean().optional()}).superRefine((value,ctx)=>{
@@ -18,5 +19,9 @@ export const alertTaskSchema=z.object({collectionTaskId:z.string().min(1),name:z
 export const querySchema=z.object({shopIds:z.array(z.string()).max(100).optional(),groups:z.array(groupSchema).max(10).optional(),productIds:ids.optional(),skuIds:ids.optional(),search:z.string().max(200).optional(),runId:z.string().max(100).optional(),view:z.enum(['sku','product']).optional(),matchMode:z.enum(['any','all']).optional(),sort:z.string().max(50).optional(),order:z.enum(['asc','desc']).optional(),page:z.number().int().min(1).max(100000).optional(),pageSize:z.number().int().min(1).max(1000).optional(),from:z.string().datetime({offset:true}).optional(),to:z.string().datetime({offset:true}).optional(),taskId:z.string().max(100).optional(),whitelistMode:z.enum(['all','excluded','included']).optional()});
 export const cookieSchema=z.union([z.string().min(1).max(200000),z.array(z.object({name:z.string().min(1),value:z.string(),domain:z.string().optional(),path:z.string().optional(),expires:z.number().optional(),expirationDate:z.number().optional(),secure:z.boolean().optional(),httpOnly:z.boolean().optional(),sameSite:z.string().optional(),session:z.boolean().optional()})).min(1).max(1000)],{error:'Cookie 格式无效：请粘贴 k=v 形式的 Cookie 字符串，或包含 name、value 字段的 JSON 数组（domain 可选）'});
 export const appKeySchema=z.string().regex(/^[A-Za-z0-9_-]{1,100}$/, 'appKey 格式无效');
-export const accountSchema=z.object({name:z.string().trim().max(100).optional(),platform:z.enum(['tmall','taobao']),cookies:cookieSchema,userAgent:z.string().max(1000).optional(),appKey:appKeySchema.optional()});
+export const accountProxySchema=z.string({error:'代理配置无效'}).max(4096,'代理配置过长').nullish().transform((value,ctx)=>{
+  try{return normalizeAccountProxy(value);}
+  catch{ctx.addIssue({code:'custom',message:'代理配置无效：请检查代理协议、主机、端口和认证信息'});return z.NEVER;}
+});
+export const accountSchema=z.object({name:z.string().trim().max(100).optional(),platform:z.enum(['tmall','taobao']),cookies:cookieSchema,userAgent:z.string().max(1000).optional(),appKey:appKeySchema.optional(),proxy:accountProxySchema});
 export const exportSchema=z.object({query:querySchema,scope:z.enum(['selected','page','all']),selectedIds:z.array(z.string()).max(20000).optional(),fields:z.array(z.string().max(40)).min(1).max(40),format:z.enum(['ids','titles','id-title','tsv','csv','text','json','markdown']),header:z.boolean(),allSkus:z.boolean().optional(),separator:z.string().max(10).optional()});
