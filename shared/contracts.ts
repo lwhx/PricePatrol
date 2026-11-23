@@ -1,3 +1,4 @@
+import type {IncidentEvent,NotificationPolicy} from './incidents.js';
 export type Platform = 'taobao' | 'tmall';
 export interface CookieRecord {name:string;value:string;domain?:string;path?:string;expires?:number;expirationDate?:number;secure?:boolean;httpOnly?:boolean;sameSite?:string;session?:boolean}
 export type CookieInput = string | CookieRecord[];
@@ -15,7 +16,7 @@ export interface CollectionTask {id:string;shopId:string;name:string;enabled:boo
 export interface MonitorTask extends CollectionTask {rules:RuleGroup[];whitelist:Whitelist;notify:boolean}
 export type TaskInput = Omit<CollectionTask,'id'|'version'|'createdAt'|'updatedAt'|'nextRunAt'>;
 export type CollectionTaskInput = TaskInput;
-export interface AlertTask {id:string;collectionTaskId:string;shopId:string;name:string;enabled:boolean;scope:'all'|'selected';productIds:string[];rules:RuleGroup[];whitelist:Whitelist;notify:boolean;version:number;createdAt:string;updatedAt:string}
+export interface AlertTask {id:string;collectionTaskId:string;shopId:string;name:string;enabled:boolean;scope:'all'|'selected';productIds:string[];rules:RuleGroup[];whitelist:Whitelist;notify:boolean;notificationPolicy?:NotificationPolicy;version:number;createdAt:string;updatedAt:string}
 export type AlertTaskInput = Omit<AlertTask,'id'|'shopId'|'version'|'createdAt'|'updatedAt'>;
 export type PriceStatus = 'ok'|'partial'|'error'|'backend_only'|'stale';
 export interface CollectedRow {shopId:string;productId:string;skuId:string;title:string;specs:string;seatSpec:string;color:string;backendPrice:string|null;before:string|null;after:string|null;backendVerified:boolean;status:PriceStatus;error?:string;sourceUrl:string;backendSource:string;detailFetchedAt:string|null;backendFetchedAt:string|null;stock:number|null}
@@ -29,10 +30,11 @@ export type RunStatus='queued'|'running'|'success'|'partial'|'failed'|'stopped'|
 export type RunTrigger = 'manual'|'scheduled'|'legacy';
 export type AlertDispatchStatus = 'not_applicable'|'pending'|'dispatched'|'skipped';
 export interface Run {id:string;taskId:string|null;shopId:string;taskName:string;shopName:string;status:RunStatus;scope:'all'|'selected';productIds:string[];expected:number;processed:number;failed:number;rows:number;checked:number;excluded:number;matched:number;unknown:number;message:string;createdAt:string;startedAt:string|null;finishedAt:string|null;parentRunId:string|null;failedProductIds:string[];notificationStatus:string;trigger?:RunTrigger;alertDispatchStatus?:AlertDispatchStatus}
-export interface AlertRun {id:string;alertTaskId:string;collectionRunId:string;shopId:string;shopName:string;taskName:string;status:'queued'|'running'|'success'|'partial'|'failed';rows:number;checked:number;excluded:number;matched:number;unknown:number;message:string;ruleVersion:number;createdAt:string;startedAt:string|null;finishedAt:string|null;notificationStatus:string}
-export interface Alert {id:string;runId:string;taskId:string|null;alertRunId?:string|null;ruleVersion?:number;shopId:string;shopName:string;productId:string;skuId:string;title:string;specs:string;backendPrice:string|null;before:string|null;after:string|null;discount:string|null;reasons:string[];state:'pending'|'confirmed'|'resolved';note:string;createdAt:string}
+export interface AlertRun {id:string;alertTaskId:string;collectionRunId:string;shopId:string;shopName:string;taskName:string;status:'queued'|'running'|'success'|'partial'|'failed';rows:number;checked:number;excluded:number;matched:number;unknown:number;message:string;ruleVersion:number;createdAt:string;startedAt:string|null;finishedAt:string|null;notificationStatus:string;notificationCandidateIds?:string[];notificationCount?:number;lifecycle?:Record<IncidentEvent,number>}
+export interface Alert {id:string;runId:string;taskId:string|null;alertRunId?:string|null;ruleVersion?:number;incidentId?:string;event?:IncidentEvent;shopId:string;shopName:string;productId:string;skuId:string;title:string;specs:string;backendPrice:string|null;before:string|null;after:string|null;discount:string|null;reasons:string[];state:'pending'|'confirmed'|'resolved';note:string;createdAt:string;resolvedAt?:string|null}
 export interface CollectorProgress {phase:string;expected:number;processed:number;failed:number;message:string}
-export interface ProductCollection {productId:string;title:string;rows:CollectedRow[];error?:string}
+/** Only a fully verified SKU listing may retire absent rows from the current-price view. */
+export interface ProductCollection {productId:string;title:string;rows:CollectedRow[];error?:string;skuSetComplete?:boolean}
 export interface CollectOptions {shopId:string;credentials:VerifiedAccount;productIds?:string[];skipProductIds?:string[];signal:AbortSignal;onProgress:(progress:CollectorProgress)=>void|Promise<void>;onProduct:(product:ProductCollection)=>void|Promise<void>}
 export interface CollectionResult {cookies:CookieRecord[];expected:number;processed:number;failedProductIds:string[];coverageComplete:boolean}
 export interface Collector {verify:(credentials:AccountCredentials,signal?:AbortSignal)=>Promise<VerifiedAccount>;collect:(options:CollectOptions)=>Promise<CollectionResult>}

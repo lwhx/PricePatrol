@@ -20,7 +20,7 @@
     }
     return [...found.values()].filter(p => !selectedOnly || p.selected);
   }
-  function jsonObjectAt(source, start) {
+  function jsonObjectAt(source, start, parseJson) {
     let depth = 0, quoted = false, escape = false;
     for (let i = start; i < source.length; i++) {
       const c = source[i];
@@ -30,11 +30,11 @@
         else if (c === '"') quoted = false;
       } else if (c === '"') quoted = true;
       else if (c === '{') depth++;
-      else if (c === '}' && --depth === 0) return JSON.parse(source.slice(start, i + 1));
+      else if (c === '}' && --depth === 0) return parseJson(source.slice(start, i + 1));
     }
     throw Error('商品JSON不完整');
   }
-  function parseHtml(html, expectedId) {
+  function parseHtml(html, expectedId, parseJson = JSON.parse) {
     if (typeof html !== 'string' || html.length > 20e6) throw Error('商品页面格式或大小异常');
     const scripts = html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi);
     for (const match of scripts) {
@@ -43,7 +43,7 @@
       const anchors = [...source.matchAll(/(?:var\s+b\s*=\s*|(?:window\.)?__ICE_APP_CONTEXT__\s*=\s*)(\{)/g)];
       for (const anchor of anchors) {
         let data;
-        try { data = jsonObjectAt(source, anchor.index + anchor[0].length - 1); } catch (_) { continue; }
+        try { data = jsonObjectAt(source, anchor.index + anchor[0].length - 1, parseJson); } catch (_) { continue; }
         const res = data?.loaderData?.home?.data?.res || data?.appData?.data?.res;
         if (res?.skuCore && res?.item) {
           if (text(res.item.itemId) !== text(expectedId)) throw Error('返回商品ID不一致');
@@ -57,14 +57,14 @@
     if (!value || typeof value !== 'object' || value.hiddenPrice === true || value.hiddenPrice === 'true') return '';
     if (/起|范围|区间|[至~～]/.test(text(value.priceDesc))) return '';
     const raw = text(value.priceText).replace(/[￥¥,\s]/g, '');
-    if (raw && !/^\d+(?:\.\d{1,2})?$/.test(raw)) return '';
+    const displayed = raw ? moneyCents(raw) : null;
+    if (raw && displayed === null) return '';
     const cents = text(value.priceMoney);
-    if (cents && /^\d+$/.test(cents) && Number.isSafeInteger(Number(cents))) {
-      const amount = Number(cents) / 100;
-      if (raw && Math.abs(Number(raw) - amount) > 0.005) return '';
-      return amount.toFixed(2);
-    }
-    return raw ? Number(raw).toFixed(2) : '';
+    if (!cents) return displayed === null ? '' : centsText(displayed);
+    if (!/^\d{1,16}$/.test(cents)) return '';
+    const amount = BigInt(cents);
+    if (amount > BigInt(Number.MAX_SAFE_INTEGER) || (displayed !== null && displayed !== amount)) return '';
+    return centsText(amount);
   }
   function rowsFromRes(res, expectedId, fetchedAt = new Date().toISOString(), sourceUrl = `https://detail.tmall.com/item.htm?id=${expectedId}`) {
     if (!validId(expectedId) || text(res?.item?.itemId) !== text(expectedId)) throw Error('返回商品ID不一致');
@@ -130,12 +130,13 @@
             && /^(售价|价格|销售价|一口价)?$/.test(text(p?.priceTitle))) {
           after = before; beforeLabel = '单一售价'; afterLabel = '无优惠（单一售价）'; priceType = '无优惠';
         } else if (before && after) {
-          priceType = Number(after) < Number(before) ? '有优惠'
-            : Number(after) === Number(before) ? '前后同价' : '价格异常';
+          const beforeCents = moneyCents(before), afterCents = moneyCents(after);
+          priceType = afterCents < beforeCents ? '有优惠'
+            : afterCents === beforeCents ? '前后同价' : '价格异常';
         }
         if (!before) warnings.push('未提供可确认的优惠前价');
         if (!after) warnings.push('未提供可确认的优惠后价');
-        if (before && after && Number(after) > Number(before)) warnings.push('优惠后价格高于优惠前');
+        if (priceType === '价格异常') warnings.push('优惠后价格高于优惠前');
       }
       const q = row?.quantity;
       return { productId:text(expectedId), title:text(res.item.title), skuId:sku.skuId,

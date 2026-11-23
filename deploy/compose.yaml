@@ -36,11 +36,16 @@ services:
       HOST: 0.0.0.0
       PORT: "3000"
       DATA_DIR: /app/data
+      BACKUP_DIR: /app/backups
+      COLLECTION_CONCURRENCY: ${COLLECTION_CONCURRENCY:-1}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?请先在 .env 配置持久 ENCRYPTION_KEY}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - pricepatrol-data:/app/data
+      - pricepatrol-backups:/app/backups
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/auth/status',{signal:AbortSignal.timeout(4000)}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -56,3 +61,5 @@ services:
 volumes:
   pricepatrol-data:
     name: ${DATA_VOLUME:-pricepatrol-data}
+  pricepatrol-backups:
+    name: ${BACKUP_VOLUME:-pricepatrol-backups}

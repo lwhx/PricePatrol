@@ -3,15 +3,18 @@ import { defineComponent } from 'vue';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { createMemoryHistory, createRouter } from 'vue-router';
 import PricesPage from '../src/pages/PricesPage.vue';
+import { savePriceQuery } from '../src/lib/price-query-state';
 vi.mock('../src/components/PriceGrid.vue', () => ({ default: { name: 'PriceGrid', template: '<div />' } }));
 vi.mock('element-plus', () => ({ ElMessage: { info: vi.fn(), success: vi.fn(), error: vi.fn() }, ElMessageBox: { confirm: vi.fn() } }));
 const shopA = { id: 'a', name: '首店' }, shopB = { id: 'b', name: '新增店' };
 let shops = [shopA];
+const dateRange = { from: '2026-11-22T04:21:07.232Z', to: '2026-11-23T05:00:00.000Z' };
 let wrapper: VueWrapper | undefined;
 const reply = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) });
 const fetcher = vi.fn(async (url: string, _options?: { body?: string }) => {
   if (url === '/api/shops') return reply({ shops: shops.map(s => ({ ...s })) });
   if (url === '/api/alert-tasks') return reply({ tasks: [{ id: 'legacy-task-id', name: '独立低价预警', shopId: 'a' }] });
+  if (url === '/api/queries') return reply({ queries: [{ id: 'named-range', name: '日期查询', query: dateRange }] });
   if (url === '/api/prices/query') return reply({ rows: [], total: 0, productCount: 0, skuCount: 0, page: 1, pageSize: 50, revision: 1 });
   return reply({ tasks: [], runs: [], queries: [] });
 });
@@ -20,7 +23,7 @@ const stubs = {
   PageHeader: passthrough, StatCards: true, ErrorBanner: true, RuleEditor: true, CopyDialog: true, PriceHistory: true, RunCompare: true, BatchAction: true,
   ElForm: { emits: ['submit'], template: '<form @submit.prevent="$emit(\'submit\', $event)"><slot /></form>' }, ElFormItem: { props: ['label'], template: '<div :data-label="label"><slot /></div>' },
   ElButton: { props: ['nativeType'], template: '<button :type="nativeType || \'button\'"><slot /></button>' },
-  ElSelect: { name: 'ElSelect', emits: ['visible-change', 'update:modelValue'], template: '<div class="test-select" @click="$emit(\'visible-change\', true)"><slot /></div>' },
+  ElSelect: { name: 'ElSelect', emits: ['visible-change', 'update:modelValue', 'change'], template: '<div class="test-select" @click="$emit(\'visible-change\', true)"><slot /></div>' },
   ElOption: { props: ['label', 'value'], template: '<span :data-option="value">{{ label }}</span>' },
   ElInput: { props: ['modelValue'], emits: ['update:modelValue'], template: '<input :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />' },
   ElDialog: true, ElPagination: true, ElDatePicker: true, ElRadioGroup: passthrough, ElRadio: passthrough,
@@ -125,4 +128,33 @@ it('白名单上下文加载独立预警任务并保留 taskId 查询协议', as
   await wrapper!.get('form').trigger('submit'); await flushPromises();
   const sent = fetcher.mock.calls.filter(([url]) => url === '/api/prices/query').at(-1)!;
   expect(JSON.parse(sent[1]!.body!)).toMatchObject({ taskId: 'legacy-task-id' });
+});
+
+it('restores session dates in local input fields and keeps applied filters visible with advanced controls collapsed', async () => {
+  savePriceQuery({ ...dateRange, runId: 'fixture-run' });
+  await openCachedPrices(false);
+  const from = wrapper!.get<HTMLInputElement>('[data-label="采集起始时间"] input');
+  const to = wrapper!.get<HTMLInputElement>('[data-label="采集截止时间"] input');
+  expect(new Date(from.element.value).toISOString()).toBe(dateRange.from);
+  expect(new Date(to.element.value).toISOString()).toBe(dateRange.to);
+  expect(from.element.value.endsWith('Z')).toBe(false);
+  expect(to.element.value.endsWith('Z')).toBe(false);
+  await wrapper!.findAll('button').find(button => button.text().startsWith('收起高级条件'))!.trigger('click');
+  expect(wrapper!.find('[data-label="采集起始时间"]').exists()).toBe(false);
+  expect(wrapper!.text()).toContain('数据批次 fixture-run');
+  expect(wrapper!.text()).toContain('采集截止');
+  await wrapper!.get('form').trigger('submit'); await flushPromises();
+  const sent = fetcher.mock.calls.filter(([url]) => url === '/api/prices/query').at(-1)!;
+  expect(JSON.parse(sent[1]!.body!)).toMatchObject(dateRange);
+});
+
+it('loads named time filters as local input values and queries the API with absolute timestamps', async () => {
+  await openCachedPrices(false);
+  wrapper!.findAllComponents({ name: 'ElSelect' }).find(select => select.text() === '日期查询')!.vm.$emit('change', 'named-range');
+  await flushPromises();
+  const from = wrapper!.get<HTMLInputElement>('[data-label="采集起始时间"] input');
+  expect(new Date(from.element.value).toISOString()).toBe(dateRange.from);
+  expect(from.element.value.endsWith('Z')).toBe(false);
+  const sent = fetcher.mock.calls.filter(([url]) => url === '/api/prices/query').at(-1)!;
+  expect(JSON.parse(sent[1]!.body!)).toMatchObject(dateRange);
 });

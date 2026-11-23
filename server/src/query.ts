@@ -1,6 +1,8 @@
 import type {DatabaseSync,SQLInputValue} from 'node:sqlite';
-import type {QueryInput,QueryResult,PriceRow,ProductRow,RuleGroup,Whitelist,AlertTask,CollectionTask,MonitorTask} from '../../shared/contracts.js';
-import type {Store} from './database.js';
+import type {ExportInput,QueryInput,QueryResult,PriceRow,ProductRow,RuleGroup,Whitelist,AlertTask,CollectionTask,MonitorTask} from '../../shared/contracts.js';
+import type {RunRecord} from './database.js';
+export interface QueryReader { db: DatabaseSync }
+import {HttpError} from './api-context.js';
 import {evaluateRules,moneyCents,formatDiscount,whitelistReason} from './domain.js';
 
 export function registerQueryFunctions(db:DatabaseSync):void{
@@ -20,7 +22,7 @@ export function registerQueryFunctions(db:DatabaseSync):void{
  });
  db.function('amount_cents',{deterministic:true},value=>{if(value===null)return null;const text=String(value),negative=text.startsWith('-'),cents=moneyCents(negative?text.slice(1):text);return cents===null?null:negative?-cents:cents;});
 }
-export function readSnapshot<T>(store:Store,fn:()=>T):T{
+export function readSnapshot<T>(store:QueryReader,fn:()=>T):T{
  if(store.db.isTransaction)return fn();store.db.exec('BEGIN');try{const value=fn();store.db.exec('COMMIT');return value;}catch(error){store.db.exec('ROLLBACK');throw error;}
 }
 interface Plan{cte:string;args:SQLInputValue[];sort:string;page:number;pageSize:number}
@@ -28,24 +30,29 @@ function isLegacyMonitorTask(task:CollectionTask|null):task is MonitorTask{
  const legacy=task as MonitorTask|null;
  return !!legacy&&Array.isArray(legacy.rules)&&Array.isArray(legacy.whitelist?.productIds)&&Array.isArray(legacy.whitelist?.titleKeywords);
 }
-function plan(store:Store,input:QueryInput,selectedIds?:string[]):Plan{
+function lookup<T>(store: QueryReader, table: 'tasks' | 'runs' | 'alert_tasks', id: string): T | undefined {
+ const active = table === 'runs' ? '' : ' AND deleted=0';
+ const row = store.db.prepare(`SELECT payload FROM ${table} WHERE id=?${active}`).get(id);
+ return row ? JSON.parse(String(row.payload)) as T : undefined;
+}
+function plan(store:QueryReader,input:QueryInput,selectedIds?:string[],materializeResult=false):Plan{
  const where:string[]=[],args:SQLInputValue[]=[];
  let groups=input.groups||[];
  if(selectedIds){where.push(`${input.view==='product'?"p.shop_id||':'||p.product_id":'p.id'} IN(SELECT value FROM json_each(?))`);args.push(JSON.stringify(selectedIds));}
- if(input.whitelistMode&&input.whitelistMode!=='all'&&!input.taskId)throw Error('白名单查询需要指定任务');
+ if(input.whitelistMode&&input.whitelistMode!=='all'&&!input.taskId)throw new HttpError(400,'白名单查询需要指定任务');
  if(input.taskId){
   let task:AlertTask|MonitorTask|undefined;
   let source:Pick<CollectionTask,'scope'|'productIds'>;
   if(input.runId){
-   const history=store.getRun(input.runId);if(!history)throw Error('采集批次不存在');
+   const history=lookup<RunRecord>(store,'runs',input.runId);if(!history)throw new HttpError(400,'采集批次不存在');
    task=history.alertTaskSnapshots?.find(snapshot=>snapshot.id===input.taskId&&snapshot.collectionTaskId===history.taskId&&snapshot.shopId===history.shopId);
    // Existing reports retain their original combined-task snapshot after migration.
    if(!task&&(!history.trigger||history.trigger==='legacy')&&history.taskId===input.taskId&&isLegacyMonitorTask(history.taskSnapshot))task=history.taskSnapshot;
-   if(!task)throw Error('该采集批次没有此预警任务的历史快照');
+   if(!task)throw new HttpError(400,'该采集批次没有此预警任务的历史快照');
    source=history;
   }else{
-   task=store.getAlertTask(input.taskId);if(!task)throw Error('预警任务不存在');
-   const collection=store.getTask(task.collectionTaskId);if(!collection)throw Error('关联采集任务不存在');
+   task=lookup<AlertTask>(store,'alert_tasks',input.taskId);if(!task)throw new HttpError(400,'预警任务不存在');
+   const collection=lookup<CollectionTask>(store,'tasks',task.collectionTaskId);if(!collection)throw new HttpError(400,'关联采集任务不存在');
    source=collection;
   }
   groups=input.groups??task.rules;
@@ -65,7 +72,8 @@ function plan(store:Store,input:QueryInput,selectedIds?:string[]):Plan{
  const product=input.view==='product';
  const unknown=groups.some(group=>group.conditions.length)?'matched IS NULL':'price_unknown(payload)=1';
  const aggregate=`SELECT shop_id,product_id,'' sku_id,product_view(json_group_array(payload),sum(matched=1),sum(${unknown})) payload,sum(matched=1) matched_count,min(discount_key) discount_min_key,max(discount_key) discount_max_key FROM evaluated GROUP BY shop_id,product_id HAVING ${input.matchMode==='all'?`sum(matched=1)=count(*) AND sum(${unknown})=0`:'sum(matched=1)>0'}`;
- const cte=`WITH base AS MATERIALIZED(SELECT p.shop_id,p.product_id,p.sku_id,json_set(p.payload,'$.tags',json(coalesce(a.tags,'[]')),'$.note',coalesce(a.note,'')) payload FROM ${input.runId?'prices':'latest'} p LEFT JOIN annotations a ON a.shop_id=p.shop_id AND a.product_id=p.product_id ${where.length?'WHERE '+where.join(' AND '):''}), evaluated AS MATERIALIZED(SELECT *,${state} matched,discount_sort(payload) discount_key FROM base), matched AS(SELECT *,1 matched_count FROM evaluated WHERE matched=1), result AS(${product?aggregate:'SELECT * FROM matched'})`;
+ const discountKey=['discount','minDiscount','maxDiscount'].includes(input.sort || '')?'discount_sort(payload)':'NULL';
+ const cte=`WITH base AS MATERIALIZED(SELECT p.shop_id,p.product_id,p.sku_id,json_set(p.payload,'$.tags',json(coalesce(a.tags,'[]')),'$.note',coalesce(a.note,'')) payload FROM ${input.runId?'prices':'latest'} p LEFT JOIN annotations a ON a.shop_id=p.shop_id AND a.product_id=p.product_id ${where.length?'WHERE '+where.join(' AND '):''}), evaluated AS MATERIALIZED(SELECT *,${state} matched,${discountKey} discount_key FROM base), matched AS(SELECT *,1 matched_count FROM evaluated WHERE matched=1), result AS ${materializeResult?'MATERIALIZED ':''}(${product?aggregate:'SELECT * FROM matched'})`;
  args.push(...rowArgs,JSON.stringify(groups));
  const field=input.sort||'updatedAt';
  const text=['id','shopId','shopName','productId','skuId','title','specs','seatSpec','color','status','updatedAt','detailFetchedAt','backendFetchedAt','note'];
@@ -75,17 +83,66 @@ function plan(store:Store,input:QueryInput,selectedIds?:string[]):Plan{
  else if(amounts.includes(field))expr=`amount_cents(json_extract(payload,'$.${field}'))`;
  else if(['skuCount','matchedSkuCount','unknownCount'].includes(field))expr=`CAST(json_extract(payload,'$.${field}') AS REAL)`;
  else if(['discount','minDiscount','maxDiscount'].includes(field))expr=product?(field==='maxDiscount'?'discount_max_key':'discount_min_key'):'discount_key';
- else throw Error('不支持的排序字段');
+ else throw new HttpError(400,'不支持的排序字段');
  const order=input.order==='asc'?'ASC':'DESC';
  const sort=`(${expr}) IS NULL ASC,${expr} ${order},shop_id ASC,product_id ASC,sku_id ASC`;
  const integer=(value:number|undefined,fallback:number)=>Number.isSafeInteger(value)&&value!>0?value!:fallback;
  return {cte,args,sort,page:integer(input.page,1),pageSize:Math.min(integer(input.pageSize,100),1000)};
 }
-export function queryStore(store:Store,input:QueryInput):QueryResult{return readSnapshot(store,()=>{
- const p=plan(store,input),count=store.db.prepare(`${p.cte} SELECT count(*) total,coalesce(sum(matched_count),0) skus FROM result`).get(...p.args)!;
- const products=store.db.prepare(`${p.cte} SELECT count(*) n FROM(SELECT 1 FROM result GROUP BY shop_id,product_id)`).get(...p.args)!;
- const rows=store.db.prepare(`${p.cte} SELECT payload FROM result ORDER BY ${p.sort} LIMIT ? OFFSET ?`).all(...p.args,p.pageSize,(p.page-1)*p.pageSize).map(row=>JSON.parse(String(row.payload)) as PriceRow);
- return {rows,total:Number(count.total),productCount:Number(products.n),skuCount:Number(count.skus),page:p.page,pageSize:p.pageSize,revision:Number(store.db.prepare('SELECT revision FROM metadata').get()?.revision||0)};
- });}
-export function queryAllStore(store:Store,input:QueryInput,selectedIds?:string[]):(PriceRow|ProductRow)[]{return readSnapshot(store,()=>{const p=plan(store,input,selectedIds);return store.db.prepare(`${p.cte} SELECT payload FROM result ORDER BY ${p.sort}`).all(...p.args).map(row=>JSON.parse(String(row.payload)) as PriceRow);});}
+export function queryStore(store:QueryReader,input:QueryInput):QueryResult {
+ return readSnapshot(store,()=>{
+  const p=plan(store,input,undefined,true);
+  // A single materialization serves summary and page, including pages past the end.
+  const summary = input.view==='product' ? 'count(*)' : '(SELECT count(*) FROM (SELECT shop_id,product_id FROM result GROUP BY shop_id,product_id))';
+  const records=store.db.prepare(`${p.cte},
+    summary AS (SELECT count(*) total,coalesce(sum(matched_count),0) skus,${summary} products FROM result),
+    page_rows AS MATERIALIZED (SELECT * FROM result ORDER BY ${p.sort} LIMIT ? OFFSET ?)
+    SELECT summary.*,page_rows.payload FROM summary LEFT JOIN page_rows ON 1 ORDER BY ${p.sort}
+  `).all(...p.args,p.pageSize,(p.page-1)*p.pageSize);
+  const first=records[0]!;
+  const rows=records.flatMap(row=>row.payload===null?[]:[JSON.parse(String(row.payload)) as PriceRow|ProductRow]);
+  return {rows,total:Number(first.total),productCount:Number(first.products),skuCount:Number(first.skus),page:p.page,pageSize:p.pageSize,revision:Number(store.db.prepare('SELECT revision FROM metadata').get()?.revision||0)};
+ });
+}
+export function queryAllStore(store:QueryReader,input:QueryInput,selectedIds?:string[]):(PriceRow|ProductRow)[]{
+ return readSnapshot(store,()=>{
+  const p=plan(store,input,selectedIds);
+  return store.db.prepare(`${p.cte} SELECT payload FROM result ORDER BY ${p.sort}`).all(...p.args).map(row=>JSON.parse(String(row.payload)) as PriceRow);
+ });
+}
 
+export interface ExportSourceRow { row: PriceRow | ProductRow; detail?: PriceRow; emit: boolean }
+/** Consume the cursor inside one read transaction. SQLite can spool sorting and deduplication to disk. */
+export function* iterateExportRows(store:QueryReader, input:ExportInput,
+ expandProduct:boolean, granular:boolean): Generator<ExportSourceRow> {
+ const selected=input.scope==='selected' ? (input.selectedIds??[]) : undefined;
+ const p=plan(store,input.query,selected);
+ const args=[...p.args];
+ const limit=input.scope==='page'?' LIMIT ? OFFSET ?':'';
+ if(limit)args.push(p.pageSize,(p.page-1)*p.pageSize);
+ const ordered=`ordered AS (SELECT *,row_number() OVER (ORDER BY ${p.sort}) ordinal FROM result ORDER BY ${p.sort}${limit})`;
+ let statement:string;
+ if(expandProduct){
+  const details=input.allSkus?'base':'matched';
+  // Spool each aggregate once. Repeating a large product's skuIds array on every
+  // detail row would make the sort spool quadratic in that product's SKU count.
+  statement=`${p.cte},${ordered}
+   SELECT o.ordinal,0 kind,'' sku_id,o.payload FROM ordered o
+   UNION ALL SELECT o.ordinal,1 kind,d.sku_id,d.payload FROM ordered o
+    JOIN ${details} d ON d.shop_id=o.shop_id AND d.product_id=o.product_id
+   ORDER BY ordinal,kind,sku_id`;
+ }else if(!granular && input.query.view!=='product'){
+  statement=`${p.cte},${ordered} SELECT payload,ordinal=min(ordinal) OVER(PARTITION BY shop_id,product_id) first_row
+   FROM ordered ORDER BY ordinal`;
+ }else{
+  statement=`${p.cte} SELECT payload FROM result ORDER BY ${p.sort}${limit}`;
+ }
+ let product:ProductRow|undefined,firstDetail=false;
+ for(const record of store.db.prepare(statement).iterate(...args)){
+  const row=JSON.parse(String(record.payload)) as PriceRow|ProductRow;
+  if(!expandProduct){yield {row,emit:record.first_row!==0};continue;}
+  if(record.kind===0){product=row as ProductRow;firstDetail=true;continue;}
+  yield {row:product!,detail:row as PriceRow,emit:granular||firstDetail};
+  firstDetail=false;
+ }
+}

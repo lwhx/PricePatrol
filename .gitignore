@@ -13,6 +13,8 @@ coverage/
 playwright-report/
 test-results/
 .encryption-key
+.setup-token
+.setup-token-*.tmp
 *.pem
 *.key
 taobao-cookies-*.json

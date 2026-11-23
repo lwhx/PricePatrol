@@ -20,12 +20,12 @@ const Option = defineComponent({ props: ['value', 'label'], setup(props) { retur
 const Group = defineComponent({ name: 'ElRadioGroup', props: ['modelValue'], emits: ['update:modelValue'], setup(_, { slots }) { return () => h('div', slots.default?.()); } });
 const Table = defineComponent({ props: ['data'], setup(props, { slots }) { provide('tableRows', computed(() => props.data || [])); return () => h('div', slots.default?.()); } });
 const Column = defineComponent({ props: ['label', 'prop', 'type'], setup(props, { slots }) { const rows = inject<ComputedRef<Record<string, unknown>[]>>('tableRows')!; return () => h('section', { 'data-column': props.label }, [props.label, ...rows.value.map(row => h('div', slots.default?.({ row }) || String(row[props.prop] ?? '')))]); } });
-const stubs = { ElForm: Box, ElFormItem: FormItem, ElInput: Input, ElSwitch: Box, ElRadioGroup: Group, ElRadio: Box, ElRadioButton: Box, ElSelect: Select, ElOption: Option, ElButton: Button, ElTable: Table, ElTableColumn: Column, ElTag: Box, ElAlert: Box, ElProgress: Box, ElTabs: Box, ElTabPane: Box, ElEmpty: Box, ElCheckboxGroup: Box, ElCheckbox: Box, ElDialog: Box };
+const stubs = { ElForm: Box, ElFormItem: FormItem, ElInput: Input, ElInputNumber: Input, ElSwitch: Box, ElRadioGroup: Group, ElRadio: Box, ElRadioButton: Box, ElSelect: Select, ElOption: Option, ElButton: Button, ElTable: Table, ElTableColumn: Column, ElTag: Box, ElAlert: Box, ElProgress: Box, ElTabs: Box, ElTabPane: Box, ElEmpty: Box, ElCheckboxGroup: Box, ElCheckbox: Box, ElDialog: Box, ElPagination: Box };
 const collection = { id: 'collection-one', shopId: 'shop-one', name: '每日采集', enabled: true, scope: 'all', productIds: [], schedule: { kind: 'daily', time: '09:00', days: [1], timezone: 'Asia/Shanghai' }, version: 1, createdAt: '2026-11-22T00:00:00Z', updatedAt: '2026-11-22T00:00:00Z', nextRunAt: null };
 const shop = { id: 'shop-one', name: '测试店铺', enabled: true };
 const collectionRun = { id: 'collection-run', taskId: collection.id, shopId: shop.id, taskName: collection.name, shopName: shop.name, status: 'success', trigger: 'manual', scope: 'all', productIds: [], expected: 1, processed: 1, failed: 0, rows: 3, checked: 0, excluded: 0, matched: 0, unknown: 0, message: '', createdAt: collection.createdAt, startedAt: collection.createdAt, finishedAt: collection.createdAt, parentRunId: null, failedProductIds: [], notificationStatus: 'skipped' };
-const alertTask = { id: 'alert-one', collectionTaskId: collection.id, shopId: shop.id, name: '低价预警', enabled: true, scope: 'all', productIds: [], rules: [{ mode: 'all', conditions: [{ field: 'discount', op: 'lt', value: '8.5' }] }], whitelist: { productIds: ['123456'], titleKeywords: ['样品'] }, notify: true, version: 3, createdAt: collection.createdAt, updatedAt: collection.createdAt };
-const alertRun = { id: 'alert-run-one', alertTaskId: alertTask.id, collectionRunId: collectionRun.id, shopId: shop.id, shopName: shop.name, taskName: alertTask.name, status: 'partial', rows: 3, checked: 2, excluded: 1, matched: 1, unknown: 1, message: '来源批次部分完成，覆盖不完整', ruleVersion: 3, createdAt: collection.createdAt, startedAt: collection.createdAt, finishedAt: collection.createdAt, notificationStatus: 'failed' };
+const alertTask = { id: 'alert-one', collectionTaskId: collection.id, shopId: shop.id, name: '低价预警', enabled: true, scope: 'all', productIds: [], rules: [{ mode: 'all', conditions: [{ field: 'discount', op: 'lt', value: '8.5' }] }], whitelist: { productIds: ['123456'], titleKeywords: ['样品'] }, notify: true, notificationPolicy: { cooldownHours: 0, notifyRecovery: true }, version: 3, createdAt: collection.createdAt, updatedAt: collection.createdAt };
+const alertRun = { id: 'alert-run-one', alertTaskId: alertTask.id, collectionRunId: collectionRun.id, shopId: shop.id, shopName: shop.name, taskName: alertTask.name, status: 'partial', rows: 3, checked: 2, excluded: 1, matched: 1, unknown: 1, message: '来源批次部分完成，覆盖不完整', ruleVersion: 3, createdAt: collection.createdAt, startedAt: collection.createdAt, finishedAt: collection.createdAt, notificationStatus: 'failed', lifecycle: { first: 0, continuing: 1, worsened: 0, recovered: 1 }, notificationCount: 1 };
 let wrapper: VueWrapper | undefined;
 beforeEach(() => {
   getMock.mockImplementation(async (path: string) => path === '/shops' ? { shops: [shop] } : path.startsWith('/alert-runs') ? { runs: [alertRun] } : path.startsWith('/runs') ? { runs: [] } : path === '/alert-tasks' ? { tasks: [alertTask] } : path === '/overview' ? { recentRuns: [] } : { tasks: [collection] });
@@ -56,6 +56,12 @@ describe('采集与预警分离交互', () => {
     expect(body).not.toHaveProperty('rules'); expect(body).not.toHaveProperty('whitelist'); expect(body).not.toHaveProperty('notify');
     expect(wrapper.text()).not.toContain('预警条件'); expect(router.currentRoute.value.path).toBe('/tasks');
   });
+  it('保存现有采集任务时发送打开编辑页时的版本', async () => {
+    const { wrapper } = await open(TaskEditPage, `/tasks/${collection.id}/edit`);
+    await wrapper.get('[data-label="任务名称"] input').setValue('修改采集名称');
+    await button(wrapper, '保存任务').trigger('click'); await flushPromises();
+    expect(patchMock).toHaveBeenCalledExactlyOnceWith(`/tasks/${collection.id}`, expect.objectContaining({ expectedVersion: collection.version, name: '修改采集名称' }));
+  });
   it('有每日计划的采集任务仍使用手动采集入口并明确不会触发预警', async () => {
     const { wrapper } = await open(TasksPage, '/tasks');
     expect(wrapper.text()).toContain('手动采集不触发预警');
@@ -80,18 +86,19 @@ describe('采集与预警分离交互', () => {
     await wrapper.get('[data-label="预警任务名称"] input').setValue('低价规则 A');
     await wrapper.get('[data-label="排除商品 ID / 链接"] textarea').setValue('123456');
     await button(wrapper, '保存预警任务').trigger('click'); await flushPromises();
-    expect(postMock).toHaveBeenCalledWith('/alert-tasks', expect.objectContaining({ name: '低价规则 A', collectionTaskId: collection.id, rules: expect.any(Array), whitelist: { productIds: ['123456'], titleKeywords: [] }, notify: true }));
+    expect(postMock).toHaveBeenCalledWith('/alert-tasks', expect.objectContaining({ name: '低价规则 A', collectionTaskId: collection.id, rules: expect.any(Array), whitelist: { productIds: ['123456'], titleKeywords: [] }, notify: true, notificationPolicy: { cooldownHours: 24, notifyRecovery: false } }));
     expect(postMock.mock.calls[0]![1]).not.toHaveProperty('shopId'); expect(postMock.mock.calls[0]![1]).not.toHaveProperty('schedule');
     await vi.waitFor(() => expect(router.currentRoute.value.path).toBe('/alert-tasks'));
   });
   it('编辑预警任务锁定来源，白名单预览与保存使用预警接口', async () => {
     const { wrapper } = await openRoute(`/alert-tasks/${alertTask.id}/edit`);
     expect(wrapper.get('[data-label="关联采集任务"] select').attributes('disabled')).toBeDefined();
+    expect(wrapper.get<HTMLInputElement>('[data-label="持续异常提醒间隔（小时）"] input').element.value).toBe('0');
     postMock.mockResolvedValueOnce({ count: 1, products: [{ productId: '123456', title: '样品沙发' }] });
     await button(wrapper, '预览数据库命中').trigger('click'); await flushPromises();
     expect(postMock).toHaveBeenCalledWith(`/alert-tasks/${alertTask.id}/whitelist/preview`, alertTask.whitelist);
     await button(wrapper, '保存预警任务').trigger('click'); await flushPromises();
-    expect(patchMock).toHaveBeenCalledWith(`/alert-tasks/${alertTask.id}`, expect.objectContaining({ collectionTaskId: collection.id, whitelist: alertTask.whitelist }));
+    expect(patchMock).toHaveBeenCalledWith(`/alert-tasks/${alertTask.id}`, expect.objectContaining({ collectionTaskId: collection.id, whitelist: alertTask.whitelist, notificationPolicy: alertTask.notificationPolicy }));
     expect(getMock).toHaveBeenCalledWith('/alert-tasks');
   });
   it('多个预警任务共享采集任务且列表只提供独立预警配置操作', async () => {
@@ -105,11 +112,31 @@ describe('采集与预警分离交互', () => {
     const { wrapper } = await openRoute(`/alert-tasks?tab=runs&collectionRunId=${collectionRun.id}`);
     expect(getMock).toHaveBeenCalledWith(`/alert-runs?collectionRunId=${collectionRun.id}`);
     expect(wrapper.text()).toContain('覆盖不完整'); expect(wrapper.text()).toContain('规则 v3');
+    expect(wrapper.text()).toContain('持续 1');
+    expect(wrapper.text()).toContain('恢复 1');
+    expect(wrapper.text()).toContain('本次通知候选 1');
     const links = wrapper.findAll('a').map(link => link.attributes('href'));
     expect(links).toContain(`/tasks?tab=runs&runId=${collectionRun.id}`);
     expect(links).toContain(`/alerts?alertRunId=${alertRun.id}`); expect(links).toContain('/prices');
     await button(wrapper, '重发汇总').trigger('click'); await flushPromises();
     expect(postMock).toHaveBeenCalledExactlyOnceWith(`/alert-runs/${alertRun.id}/notify`);
+  });
+  it('对全局停用时冻结的候选重发原预警执行，隐藏无候选或已提交的操作', async () => {
+    const runs = [
+      { ...alertRun, id:'global-disabled', notificationStatus:'disabled', notificationCount:1 },
+      { ...alertRun, id:'task-disabled', notificationStatus:'disabled', notificationCount:0 },
+      { ...alertRun, id:'legacy-disabled', notificationStatus:'disabled', notificationCount:undefined },
+      { ...alertRun, id:'empty', notificationStatus:'not_configured', notificationCount:0 },
+      { ...alertRun, id:'submitted', notificationStatus:'accepted' },
+      { ...alertRun, id:'in-flight', notificationStatus:'sending' },
+    ];
+    getMock.mockImplementation(async (path: string) => path === '/shops' ? { shops:[shop] } : path.startsWith('/alert-runs') ? { runs } : { tasks:[] });
+    const { wrapper } = await openRoute('/alert-tasks?tab=runs');
+    const actions = wrapper.findAll('button').filter(item => item.text() === '重发汇总');
+    expect(actions).toHaveLength(1);
+    await actions[0]!.trigger('click');
+    await flushPromises();
+    expect(postMock).toHaveBeenCalledExactlyOnceWith('/alert-runs/global-disabled/notify');
   });
   it('预警记录支持独立预警执行来源，并保留旧批次过滤', async () => {
     getMock.mockImplementation(async (path: string) => path.startsWith('/alerts') ? { alerts: [] } : path === '/shops' ? { shops: [shop] } : path.startsWith('/alert-runs') ? { runs: [alertRun] } : { runs: [collectionRun] });
@@ -122,8 +149,8 @@ describe('采集与预警分离交互', () => {
   });
   it('清空预警处理状态不会发送字符串 undefined 或 null', async () => {
     getMock.mockImplementation(async (path: string) => path.startsWith('/alerts') ? { alerts: [] } : path === '/shops' ? { shops: [shop] } : { runs: [] });
-    const { wrapper } = await openRoute('/alerts');
-    const select = wrapper.findAllComponents(Select).find(component => component.props('placeholder') === '全部处理状态')!;
+    const { wrapper } = await openRoute('/alerts?tab=evidence');
+    const select = wrapper.findAllComponents(Select).find(component => component.props('placeholder') === '全部旧版处理状态')!;
     select.vm.$emit('update:modelValue', undefined); select.vm.$emit('change', undefined); await flushPromises();
     const request = getMock.mock.calls.filter(([path]) => String(path).startsWith('/alerts')).at(-1)![0];
     expect(request).not.toContain('undefined'); expect(request).not.toContain('null');

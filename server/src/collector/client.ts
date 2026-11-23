@@ -9,6 +9,7 @@ export const core = require('./vendor/core.cjs');
 export const backend = require('./vendor/backend.cjs');
 export const platforms = require('./vendor/platform.cjs');
 const tokenName = ['_m_h5_', 'tk'].join('');
+const wireMoneyFields = new Set(['price', 'priceText', 'priceMoney']);
 export const validId = (v: unknown): v is string => typeof v === 'string' && /^[1-9]\d{5,19}$/.test(v);
 const sellerId = (v: unknown): string => typeof v === 'string' && /^\d{1,20}$/.test(v) ? v : typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? String(v) : '';
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -21,14 +22,14 @@ interface PlatformInfo {
 export interface BackendProduct {
     productId: string;
     title: string;
-    rows: any[];
+    raw: any;
 }
 export interface Page {
     current: number;
     pageSize: number;
     total: number;
     products: BackendProduct[];
-    raw: any;
+    at: string;
 }
 export interface CollectorConfiguration {
     transport?: HttpTransport;
@@ -37,10 +38,20 @@ export interface CollectorConfiguration {
     timeoutMs?: number;
 }
 export function fail(code: string, message: string): never { throw new CollectorError(code, message); }
+function parseProviderJson(source: string): any {
+    // Node 24 exposes the wire token for primitives before Number rounding.
+    return JSON.parse(source, (key, value, context?: {source?: string}) => {
+        if (typeof value !== 'number' || !wireMoneyFields.has(key))
+            return value;
+        if (context?.source === undefined)
+            fail('INVALID_RESPONSE', '接口金额缺少可核验的原始数值');
+        return context.source;
+    });
+}
 function objectJson(value: unknown): any {
     if (typeof value === 'string') {
         try {
-            return JSON.parse(value);
+            return parseProviderJson(value);
         }
         catch {
             fail('INVALID_RESPONSE', '接口返回的数据无法解析');
@@ -49,16 +60,20 @@ function objectJson(value: unknown): any {
     return value;
 }
 function businessFailure(value: any): void {
-    const code = [value?.code, value?.errorCode, value?.subCode, value?.status, ...(Array.isArray(value?.ret) ? value.ret : [])].join(' ');
+    const retCodes = Array.isArray(value?.ret) ? value.ret.filter((r: unknown) => typeof r === 'string').map((r: string) => r.split('::', 1)[0]) : [];
+    const codes = [value?.code, value?.errorCode, value?.subCode, value?.status, ...retCodes];
+    const code = codes.map(part => String(part ?? '').split('::', 1)[0]).join(' ');
     const message = [value?.message, value?.msg, value?.errorMsg].join(' ');
     if (/LIMIT|FREQUENCY|TRAFFIC|FLOOD|RGV587/i.test(code))
         fail('RATE_LIMIT', '接口访问频繁，请稍后重试');
-    if (/TOKEN|SESSION|PERMISSION|AUTH|LOGIN|ILLEGAL_ACCESS|ACCESS_DENIED|INVALID_USER|USER_VALIDATE|SECURITY|RGV|FORBIDDEN/i.test(code) || /登录|权限|认证|验证/.test(message))
+    const explicitAuth = /TOKEN|SESSION|PERMISSION|AUTH|LOGIN|ILLEGAL_ACCESS|ACCESS_DENIED|INVALID_USER|USER_VALIDATE|SECURITY|RGV|FORBIDDEN|\b(?:401|403)\b/i.test(code);
+    const authMessage = /未登录|请[^。；，]{0,12}登录|登录[^。；，]{0,8}(?:失效|过期)|(?:没有|缺少|无|不足)[^。；，]{0,8}权限|权限不足|(?:需要|请完成)人工验证/.test(message);
+    if (explicitAuth || (value?.success !== true && !retCodes.includes('SUCCESS') && authMessage))
         fail('AUTH_REQUIRED', '会话失效、需要人工验证或没有商品读取权限');
 }
-function normalizePage(reply: any, current: number, sku: boolean, platform: PlatformInfo, at: string): Page {
-    const result = objectJson(reply?.data?.result);
+function normalizePage(reply: any, current: number, platform: PlatformInfo, at: string): Page {
     businessFailure(reply);
+    const result = objectJson(reply?.data?.result);
     businessFailure(result);
     if (!Array.isArray(reply?.ret) || !reply.ret.length || !reply.ret.every((r: unknown) => typeof r === 'string' && /^SUCCESS(?:::.*)?$/.test(r)))
         fail('MTOP_FAILED', '后台接口没有返回成功状态');
@@ -73,15 +88,20 @@ function normalizePage(reply: any, current: number, sku: boolean, platform: Plat
     if (source.length !== wanted || current > Math.max(1, Math.ceil(total / pageSize)))
         fail('COVERAGE_INCOMPLETE', '后台分页覆盖不足，商品数量与分页声明不符');
     const seen = new Set<string>();
+    const products: BackendProduct[] = [];
     for (const p of source) {
         const id = typeof p?.itemId === 'number' && Number.isSafeInteger(p.itemId) ? String(p.itemId) : p?.itemId;
         if (!validId(id))
             fail('INVALID_RESPONSE', '后台商品标识无效');
-        p.itemId = id;
         if (seen.has(id))
             fail('COVERAGE_INCOMPLETE', '后台返回重复商品，无法确认覆盖完整');
         seen.add(id);
-        for (const d of p.itemDesc?.desc ?? [])
+        const descriptions = p.itemDesc?.desc ?? [];
+        if (!Array.isArray(descriptions))
+            fail('INVALID_RESPONSE', '后台商品描述格式无效');
+        for (const d of descriptions) {
+            if (!d || typeof d !== 'object')
+                fail('INVALID_RESPONSE', '后台商品描述格式无效');
             for (const value of [d.url, d.href, d.link]) {
                 if (typeof value !== 'string')
                     continue;
@@ -95,30 +115,11 @@ function normalizePage(reply: any, current: number, sku: boolean, platform: Plat
                         throw e;
                 }
             }
+        }
+        const title = descriptions.find(d => d.uiType === 'link')?.text;
+        products.push({ productId: id, title: typeof title === 'string' ? title.trim() : '', raw: p });
     }
-    let products: BackendProduct[] = source.map((p: any) => ({ productId: p.itemId, title: p.itemDesc?.desc?.find((d: any) => d.uiType === 'link')?.text ?? '', rows: [] }));
-    if (sku && total > 0) {
-        try {
-            products = backend.parsePage({ ...reply, sourceApi: platform.api }, current, at).products;
-        }
-        catch (e) {
-            if (e instanceof CollectorError)
-                throw e;
-            fail('INVALID_RESPONSE', '后台 SKU 标识、精确金额或分页校验失败');
-        }
-        for (const p of products) {
-            const ids = new Set();
-            for (const row of p.rows) {
-                if (ids.has(row.skuId))
-                    fail('INVALID_RESPONSE', '后台 SKU 标识重复或冲突');
-                ids.add(row.skuId);
-            }
-        }
-        for (let i = 0; i < products.length; i++)
-            for (let j = 0; j < products[i].rows.length; j++)
-                products[i].rows[j].specs = typeof source[i].skuList[j].props === 'string' ? source[i].skuList[j].props : '';
-    }
-    return { current, pageSize, total, products, raw: reply };
+    return { current, pageSize, total, products, at };
 }
 export function pageInvariant(page: Page, baseline: Page | undefined, seen: Set<string>): void {
     if (baseline && (page.pageSize !== baseline.pageSize || page.total !== baseline.total))
@@ -140,6 +141,12 @@ function identity(res: any): {
     return { sellerId: id, shopName: name?.trim() ?? `卖家 ${id}` };
 }
 export const fatal = (e: unknown) => e instanceof CollectorError && ['AUTH_REQUIRED', 'COOKIE_INVALID', 'RATE_LIMIT', 'IDENTITY_CHANGED', 'IDENTITY_UNVERIFIED', 'PLATFORM_MISMATCH', 'ABORTED'].includes(e.code);
+interface ProductDetail {
+    res: any;
+    url: string;
+    at: string;
+    identity: { sellerId: string; shopName: string };
+}
 export class Client {
     readonly http: SessionHttp;
     readonly platform: PlatformInfo;
@@ -188,37 +195,54 @@ export class Client {
             const reply = objectJson(response.body);
             if (attempt === 0 && Array.isArray(reply?.ret) && reply.ret.some((r: unknown) => typeof r === 'string' && /^FAIL_SYS_TOKEN_(?:EMPTY|EXOIRED|EXPIRED)(?:::|$)/.test(r)) && this.http.jar.getCookiesSync(base).some(c => c.key === tokenName))
                 continue;
-            return normalizePage(reply, current, tab === 'on_sale_skucenter', this.platform, this.stamp());
+            return normalizePage(reply, current, this.platform, this.stamp());
         }
         fail('AUTH_REQUIRED', '令牌刷新失败，请重新登录');
     }
-    async detail(id: string, signal: AbortSignal): Promise<{
-        res: any;
-        rows: any[];
-        url: string;
-        at: string;
-        identity: {
-            sellerId: string;
-            shopName: string;
-        };
-    }> {
+    backendRows(product: BackendProduct, at: string): any[] {
+        let rows: any[];
+        try {
+            ({ rows } = backend.normalizeProduct(product.raw, at, this.platform.api));
+        }
+        catch {
+            fail('BACKEND_SKU_INVALID', '后台 SKU 列表、标识或精确金额校验失败');
+        }
+        const ids = new Set<string>();
+        return rows.map((row, index) => {
+            if (ids.has(row.skuId))
+                fail('BACKEND_SKU_INVALID', '后台 SKU 标识重复或冲突');
+            ids.add(row.skuId);
+            const props = product.raw.skuList[index].props;
+            return { ...row, specs: typeof props === 'string' ? props : '' };
+        });
+    }
+    async detail(id: string, signal: AbortSignal): Promise<ProductDetail> {
         const url = platforms.productUrl(this.platform.id, id);
         const response = await this.http.send(url, { method: 'GET', accept: 'text/html' }, signal);
         const at = this.stamp();
         if (/(?:login\.taobao\.com|login\.tmall\.com|验证码|访问验证)/i.test(response.body) && !response.body.includes('__ICE_APP_CONTEXT__'))
             fail('AUTH_REQUIRED', '详情要求登录或人工验证');
-        let res: any, rows: any[];
+        let res: any;
         try {
-            res = core.parseHtml(response.body, id);
-            const identifiers = [res.item.itemId, ...(Array.isArray(res.skuBase?.skus) ? res.skuBase.skus.map((sku: any) => sku.skuId) : [])];
-            if (identifiers.some(value => typeof value === 'number' && !Number.isSafeInteger(value)))
+            res = core.parseHtml(response.body, id, parseProviderJson);
+            if (typeof res.item.itemId === 'number' && !Number.isSafeInteger(res.item.itemId))
                 fail('DETAIL_INVALID', '详情标识使用了不安全的数值精度');
-            rows = core.rowsFromRes(res, id, at, url);
         }
         catch {
-            fail('DETAIL_INVALID', '详情商品 ID、SKU 或页面数据校验失败');
+            fail('DETAIL_INVALID', '详情商品 ID 或页面数据校验失败');
         }
-        return { res, rows, url, at, identity: identity(res) };
+        return { res, url, at, identity: identity(res) };
+    }
+    detailRows(detail: ProductDetail, id: string): any[] {
+        const { res, at, url } = detail;
+        try {
+            if (Array.isArray(res.skuBase?.skus) && res.skuBase.skus.some((sku: any) => typeof sku?.skuId === 'number' && !Number.isSafeInteger(sku.skuId)))
+                fail('DETAIL_INVALID', '详情标识使用了不安全的数值精度');
+            return core.rowsFromRes(res, id, at, url);
+        }
+        catch {
+            fail('DETAIL_INVALID', '详情 SKU 或价格数据校验失败');
+        }
     }
 }
 

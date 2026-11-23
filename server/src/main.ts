@@ -4,15 +4,16 @@ import {join,resolve} from 'node:path';
 import {Store} from './database.js';
 import {buildApp} from './app.js';
 import {createCollector} from './collector/index.js';
-import {hashPassword} from './security.js';
+import {prepareBootstrap} from './bootstrap.js';
 const dataDir=resolve(process.env.DATA_DIR||'data');await mkdir(dataDir,{recursive:true});
 let encryptionKey=process.env.ENCRYPTION_KEY||'';
 if(!encryptionKey){const keyFile=join(dataDir,'.encryption-key');try{encryptionKey=(await readFile(keyFile,'utf8')).trim();}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;encryptionKey=randomBytes(32).toString('hex');await writeFile(keyFile,encryptionKey,{mode:0o600,flag:'wx'});}}
 const store=new Store(join(dataDir,'monitor.sqlite'),encryptionKey);
-if(process.env.ADMIN_PASSWORD&&!store.getConfig('admin.hash','')){if(process.env.ADMIN_PASSWORD.length<10)throw Error('ADMIN_PASSWORD至少10字符');store.setConfig('admin.hash',await hashPassword(process.env.ADMIN_PASSWORD));}
+const setupToken=await prepareBootstrap(store,dataDir);
 const port=Number(process.env.PORT||3000);const host=process.env.HOST||'127.0.0.1';
 const allowedOrigins=(process.env.ALLOWED_ORIGINS||'http://localhost:5173,http://127.0.0.1:5173').split(',').filter(Boolean);
-const {app,worker,alertWorker,scheduler}=await buildApp({store,collector:createCollector(),dataDir,encryptionKey,allowedOrigins});worker.recover();alertWorker.recover();scheduler.start();
+const collectionConcurrency=Number(process.env.COLLECTION_CONCURRENCY||1);
+const {app,worker,alertWorker,scheduler,maintenance}=await buildApp({store,collector:createCollector(),dataDir,encryptionKey,allowedOrigins,setupToken,collectionConcurrency});worker.recover();alertWorker.recover();scheduler.start();maintenance.start();
 await app.listen({host,port});console.log(`电商价格监控已启动：http://${host}:${port}`);
 let stopping=false;async function close(){if(stopping)return;stopping=true;await app.close();store.close();process.exit(0);}
 process.on('SIGINT',()=>void close());process.on('SIGTERM',()=>void close());

@@ -72,9 +72,15 @@ export function importCookies(input: CookieInput): CookieJar {
 }
 export function exportCookies(jar: CookieJar): CookieRecord[] {
     const cookies = (jar.serializeSync()?.cookies ?? []).map(c => Cookie.fromJSON(c)).filter((c): c is Cookie => !!c);
-    return cookies.filter(c => allowedDomain(c.domain ?? '') && (c.expiryTime() ?? Infinity) > Date.now()).map(c => ({
-        name: c.key, value: c.value, domain: c.hostOnly ? c.domain! : '.' + c.domain!, path: c.path ?? '/', secure: !!c.secure, httpOnly: !!c.httpOnly,
-        ...(c.sameSite ? { sameSite: c.sameSite } : {}), ...(c.expires instanceof Date ? { expires: c.expires.getTime() / 1000 } : { session: true })
-    }));
+    const now = Date.now();
+    return cookies.flatMap(c => {
+        const expiry = c.expiryTime() ?? Infinity;
+        if (!allowedDomain(c.domain ?? '') || expiry <= now)
+            return [];
+        return [{
+            name: c.key, value: c.value, domain: c.hostOnly ? c.domain! : '.' + c.domain!, path: c.path ?? '/', secure: !!c.secure, httpOnly: !!c.httpOnly,
+            ...(c.sameSite ? { sameSite: c.sameSite } : {}), ...(Number.isFinite(expiry) ? { expires: expiry / 1000 } : { session: true })
+        }];
+    });
 }
 

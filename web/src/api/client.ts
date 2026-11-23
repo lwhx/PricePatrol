@@ -37,3 +37,14 @@ export async function download(path: string, method = 'GET', fallbackName = 'dow
   const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
   saveBlob(await response.blob(), encoded ? decodeURIComponent(encoded) : fallbackName);
 }
+// Let the browser stream a prepared file without buffering the complete body in JavaScript.
+export async function downloadStream(path: string, filename: string) {
+  const response = await fetch(`/api${path}`, {method:'HEAD',credentials:'include'});
+  if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event('session-expired'));
+    const message = response.status === 410 ? '导出文件已丢失，请重新生成' : response.status === 404 ? '导出任务已过期或不存在，请重新生成' : `文件暂时不可下载（HTTP ${response.status}）`;
+    throw new ApiError(message,response.status);
+  }
+  const anchor = document.createElement('a'); anchor.href = `/api${path}`; anchor.download = filename;
+  document.body.appendChild(anchor); anchor.click(); anchor.remove();
+}

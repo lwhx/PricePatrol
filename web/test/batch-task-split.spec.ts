@@ -18,12 +18,13 @@ const reply = (data: unknown) => ({ ok: true, status: 200, text: async () => JSO
 const fetcher = vi.fn(async (url: string, _options?: { body?: string; method?: string }) => {
   if (url === '/api/tasks') return reply({ tasks: collections });
   if (url === '/api/alert-tasks') return reply({ tasks: alertTasks });
+  if (url.endsWith('/collect')) return reply({ run: { id: `run-${url.split('/')[3]}` } });
   return reply({ added: 1, existing: 0 });
 });
 let wrapper: VueWrapper | undefined;
 beforeEach(() => { fetcher.mockClear(); confirmMock.mockResolvedValue(undefined); vi.stubGlobal('fetch', fetcher); });
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.clearAllMocks(); vi.unstubAllGlobals(); });
-async function open(type: 'task' | 'whitelist' | 'collect') { wrapper = mount(BatchAction, { props: { rows, type }, global: { stubs } }); await flushPromises(); return wrapper; }
+async function open(type: 'task' | 'whitelist' | 'collect', selectedRows = rows) { wrapper = mount(BatchAction, { props: { rows: selectedRows, type }, global: { stubs } }); await flushPromises(); return wrapper; }
 async function chooseAndSave(id: string) { wrapper!.findComponent(Select).vm.$emit('update:modelValue', id); await flushPromises(); await wrapper!.findAll('button').find(button => button.text() === '确认保存')!.trigger('click'); await flushPromises(); }
 
 describe('采集范围与预警白名单分别操作', () => {
@@ -40,15 +41,15 @@ describe('采集范围与预警白名单分别操作', () => {
     expect(wrapper!.emitted('complete')).toHaveLength(1);
   });
 
-  it('加入范围继续操作同店指定商品采集任务并去重已有商品', async () => {
+  it('通过追加接口提交选中的商品，不发送旧任务范围', async () => {
     await open('task');
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual(['/api/tasks']);
     expect(wrapper!.find('[data-option="collection"]').text()).toBe('每日采集');
     expect(wrapper!.find('[data-option="all-collection"]').exists()).toBe(false);
     await chooseAndSave('collection');
-    const mutation = fetcher.mock.calls.find(([url]) => url === '/api/tasks/collection');
-    expect(mutation?.[1]?.method).toBe('PATCH');
-    expect(JSON.parse(mutation![1]!.body!)).toEqual({ productIds: ['100', '200'] });
+    const mutation = fetcher.mock.calls.find(([url]) => url === '/api/tasks/collection/products');
+    expect(mutation?.[1]?.method).toBe('POST');
+    expect(JSON.parse(mutation![1]!.body!)).toEqual({ productIds: ['200'] });
     expect(fetcher.mock.calls.some(([url]) => url.startsWith('/api/alert-tasks'))).toBe(false);
   });
 
@@ -58,7 +59,25 @@ describe('采集范围与预警白名单分别操作', () => {
     await wrapper!.findAll('button').find(button => button.text() === '确认采集')!.trigger('click'); await flushPromises();
     expect(confirmMock.mock.calls[0]?.[0]).toContain('不触发预警');
     const mutation = fetcher.mock.calls.find(([url]) => url === '/api/shops/a/collect');
-    expect(JSON.parse(mutation![1]!.body!)).toEqual({ productIds: ['200'] });
+    expect(JSON.parse(mutation![1]!.body!)).toEqual({ productIds: ['200'], idempotencyKey: expect.any(String) });
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('重试仅提交失败店铺，为丢失的响应沿用原请求标识', async () => {
+    fetcher.mockResolvedValueOnce(reply({ run: { id: 'accepted-a' } }))
+      .mockRejectedValueOnce(new Error('连接中断'))
+      .mockResolvedValueOnce(reply({ run: { id: 'accepted-c' } }));
+    const selected = [...rows, ...['b', 'c'].map(shopId => ({ ...rows[0]!, id: `${shopId}:200`, shopId }))];
+    await open('collect', selected);
+    await wrapper!.findAll('button').find(button => button.text() === '确认采集')!.trigger('click'); await flushPromises();
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual(['/api/shops/a/collect', '/api/shops/b/collect', '/api/shops/c/collect']);
+    expect(wrapper!.emitted('complete')).toBeUndefined();
+    const requests = fetcher.mock.calls.map(([, options]) => JSON.parse(options!.body!));
+    expect(new Set(requests.map(body => body.idempotencyKey)).size).toBe(3);
+    await wrapper!.findAll('button').find(button => button.text() === '重试失败店铺')!.trigger('click'); await flushPromises();
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher.mock.calls[3]).toEqual(fetcher.mock.calls[1]);
+    expect(confirmMock.mock.calls[1]![0]).toContain('1 家店铺');
+    expect(wrapper!.emitted('complete')).toHaveLength(1);
   });
 });
