@@ -10,6 +10,8 @@ RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
+ARG BUILD_SHA=dev
+ARG BUILD_TIME
 LABEL org.opencontainers.image.title="价巡 PricePatrol" \
       org.opencontainers.image.description="多店铺淘宝/天猫 SKU 价格监控：Cookie 采集、折扣预警、多任务调度" \
       org.opencontainers.image.source="https://github.com/lwhx/PricePatrol" \
@@ -18,6 +20,9 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
     DATA_DIR=/app/data \
+    BACKUP_DIR=/app/backups \
+    BUILD_SHA=${BUILD_SHA} \
+    BUILD_TIME=${BUILD_TIME} \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY package.json package-lock.json ./
 # The CLI comes from the locked local package, so its browser revision always
@@ -28,13 +33,13 @@ RUN npm ci --omit=dev \
     && apt-get install -y --no-install-recommends fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/* \
     && npm cache clean --force \
-    && mkdir -p /app/data \
-    && chown node:node /app/data
+    && mkdir -p /app/data /app/backups \
+    && chown node:node /app/data /app/backups
 COPY --chown=node:node server/src ./server/src
 COPY --chown=node:node shared ./shared
 COPY --from=build --chown=node:node /app/web/dist ./web/dist
 USER node
-VOLUME ["/app/data"]
+VOLUME ["/app/data", "/app/backups"]
 EXPOSE 3000
 STOPSIGNAL SIGTERM
 CMD ["node", "--import", "tsx", "server/src/main.ts"]

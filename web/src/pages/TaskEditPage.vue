@@ -11,7 +11,7 @@ type CollectionInput = Pick<CollectionTask, 'name' | 'shopId' | 'enabled' | 'sco
 const route = useRoute(), router = useRouter();
 const editing = computed(() => typeof route.params.id === 'string' ? route.params.id : '');
 const { busy, error, act } = useFeedback();
-const loading = ref(true), shops = ref<Shop[]>([]), productText = ref('');
+const loading = ref(true), shops = ref<Shop[]>([]), productText = ref(''), version = ref<number | null>(null);
 const form = reactive<CollectionInput>({ name: '', shopId: '', enabled: true, scope: 'all', productIds: [], schedule: { kind: 'manual', time: '09:00', days: [1], timezone: 'Asia/Shanghai' } });
 function payload(): CollectionInput {
   if (!form.name.trim()) throw new Error('请填写任务名称');
@@ -24,13 +24,22 @@ function payload(): CollectionInput {
   if (form.schedule.kind !== 'manual' && !/^\d{2}:\d{2}$/.test(form.schedule.time)) throw new Error('请设置计划运行时间');
   return { name: form.name.trim(), shopId: form.shopId, enabled: form.enabled, scope: form.scope, productIds, schedule: JSON.parse(JSON.stringify(form.schedule)) };
 }
-async function save() { await act(async () => { const body = payload(); if (editing.value) await patch(`/tasks/${editing.value}`, body); else await post('/tasks', body); await router.push('/tasks'); }, '采集任务已保存，配置将在之后创建的采集批次生效'); }
+async function save() {
+  if (busy.value || loading.value || (editing.value && version.value === null)) return;
+  await act(async () => {
+    const body = payload();
+    if (editing.value) await patch(`/tasks/${editing.value}`, { ...body, expectedVersion: version.value });
+    else await post('/tasks', body);
+    await router.push('/tasks');
+  }, '采集任务已保存，配置将在之后创建的采集批次生效');
+}
 onMounted(async () => {
   await act(async () => {
     shops.value = (await get<{ shops: Shop[] }>('/shops')).shops;
     if (editing.value) {
       const task = (await get<{ tasks: CollectionTask[] }>('/tasks')).tasks.find(item => item.id === editing.value);
       if (!task) throw new Error('该采集任务不存在或已删除');
+      version.value = task.version;
       Object.assign(form, { name: task.name, shopId: task.shopId, enabled: task.enabled, scope: task.scope, productIds: task.productIds, schedule: task.schedule }); productText.value = task.productIds.join('\n');
     } else if (shops.value.length === 1) form.shopId = shops.value[0]!.id;
   }); loading.value = false;
@@ -39,7 +48,7 @@ onMounted(async () => {
 <template>
   <div class="editor-width" v-loading="loading">
     <PageHeader :title="editing ? '编辑采集任务' : '新建采集任务'" description="设置采集商品和执行计划。一个采集任务可供多个预警任务共用价格证据。">
-      <el-button @click="$router.push('/tasks')">返回列表</el-button><el-button type="primary" :loading="busy" :disabled="loading" @click="save">保存任务</el-button>
+      <el-button @click="$router.push('/tasks')">返回列表</el-button><el-button type="primary" :loading="busy" :disabled="loading || (!!editing && version === null)" @click="save">保存任务</el-button>
     </PageHeader>
     <ErrorBanner :message="error" />
     <el-form label-position="top">
@@ -67,6 +76,6 @@ onMounted(async () => {
         </div>
       </section>
     </el-form>
-    <div class="header-actions"><el-button @click="$router.push('/tasks')">返回列表</el-button><el-button type="primary" :loading="busy" :disabled="loading" @click="save">保存任务</el-button></div>
+    <div class="header-actions"><el-button @click="$router.push('/tasks')">返回列表</el-button><el-button type="primary" :loading="busy" :disabled="loading || (!!editing && version === null)" @click="save">保存任务</el-button></div>
   </div>
 </template>

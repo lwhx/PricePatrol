@@ -1,6 +1,8 @@
 import {randomUUID} from 'node:crypto';
 import type {Collector, CollectedRow} from '../../shared/contracts.js';
 import type {Store, RunRecord} from './database.js';
+import {HttpError} from './api-context.js';
+import type {DiagnosticReporter} from './diagnostics.js';
 
 const now = () => new Date().toISOString();
 
@@ -12,7 +14,8 @@ export class Worker {
   private closed = false;
 
   constructor(private store: Store, private collector: Collector,
-    private onCompleted?: (run: RunRecord) => void | Promise<void>) {}
+    private onCompleted?: (run: RunRecord) => void | Promise<void>,
+    private report?: DiagnosticReporter) {}
 
   recover(): void {
     for (const run of this.store.operationalRuns(['running', 'queued'])) {
@@ -22,11 +25,11 @@ export class Worker {
 
   enqueue(shopId: string, taskId: string | null = null, productIds?: string[], scheduled = false): RunRecord {
     const shop = this.store.getShop(shopId);
-    if (!shop?.enabled) throw Error('店铺不存在或已停用');
-    if (shop.sessionStatus !== 'valid') throw Error('账号需要重新验证');
+    if (!shop?.enabled) throw new HttpError(400, '店铺不存在或已停用');
+    if (shop.sessionStatus !== 'valid') throw new HttpError(400, '账号需要重新验证');
     const task = taskId ? this.store.getTask(taskId) : null;
-    if (taskId && (!task || task.shopId !== shopId)) throw Error('采集任务不属于该店铺');
-    if (scheduled && (!task?.enabled || task.schedule.kind === 'manual')) throw Error('该任务未启用定时采集');
+    if (taskId && (!task || task.shopId !== shopId)) throw new HttpError(400, '采集任务不属于该店铺');
+    if (scheduled && (!task?.enabled || task.schedule.kind === 'manual')) throw new HttpError(400, '该任务未启用定时采集');
     const trigger = scheduled ? 'scheduled' : 'manual';
     // A manual click must never merge into a scheduled run (or inherit its alerts).
     if (taskId) {
@@ -53,16 +56,16 @@ export class Worker {
 
   stop(id: string): RunRecord {
     const run = this.requireRun(id);
-    if (!['running', 'queued', 'auth_required', 'recoverable'].includes(run.status)) throw Error('该采集不能停止');
+    if (!['running', 'queued', 'auth_required', 'recoverable'].includes(run.status)) throw new HttpError(400, '该采集不能停止');
     if (this.activeId === id) this.active?.abort();
     run.status = 'stopped'; run.message = '已停止，可继续'; this.store.saveRun(run); return run;
   }
 
   resume(id: string): RunRecord {
     const run = this.requireRun(id);
-    if (!['stopped', 'recoverable', 'auth_required'].includes(run.status)) throw Error('该采集不能继续，请重新运行或重试失败项');
+    if (!['stopped', 'recoverable', 'auth_required'].includes(run.status)) throw new HttpError(400, '该采集不能继续，请重新运行或重试失败项');
     this.requireValidShop(run.shopId);
-    if (this.activeId === id) throw Error('正在结束请求，请稍后继续');
+    if (this.activeId === id) throw new HttpError(400, '正在结束请求，请稍后继续');
     // Resume preserves the original provenance and frozen alert configuration.
     run.status = 'queued'; run.message = '等待继续'; run.finishedAt = null;
     this.store.saveRun(run); this.kick(); return run;
@@ -70,7 +73,7 @@ export class Worker {
 
   retry(id: string): RunRecord {
     const prior = this.requireRun(id);
-    if (!['success', 'partial', 'failed'].includes(prior.status) || !prior.failedProductIds.length) throw Error('没有可重试的失败商品');
+    if (!['success', 'partial', 'failed'].includes(prior.status) || !prior.failedProductIds.length) throw new HttpError(400, '没有可重试的失败商品');
     this.requireValidShop(prior.shopId);
     const existing = this.store.operationalRuns(['queued', 'running']).find(r => r.parentRunId === id);
     if (existing) return existing;
@@ -87,10 +90,10 @@ export class Worker {
 
   async whenIdle(): Promise<void> {while (this.draining) await this.draining;}
   async close(): Promise<void> {this.closed = true; this.active?.abort(); await this.whenIdle();}
-  private requireRun(id: string): RunRecord {const run = this.store.getRun(id); if (!run) throw Error('采集记录不存在'); return run;}
+  private requireRun(id: string): RunRecord {const run = this.store.getRun(id); if (!run) throw new HttpError(400, '采集记录不存在'); return run;}
   private requireValidShop(id: string): void {
     const shop = this.store.getShop(id);
-    if (!shop?.enabled || shop.sessionStatus !== 'valid') throw Error('请先验证店铺登录状态');
+    if (!shop?.enabled || shop.sessionStatus !== 'valid') throw new HttpError(400, '请先验证店铺登录状态');
   }
   private kick(): void {
     if (this.closed || this.draining) return;
@@ -105,6 +108,7 @@ export class Worker {
       if (!run) break;
       try {await this.execute(run);}
       catch {
+        this.report?.('collection_failed', {runId:run.id});
         const current = this.store.getRun(run.id);
         if (current && !current.finishedAt) {
           current.status = 'failed'; current.finishedAt = now(); current.message = '采集异常中止，请查看账号状态或重试';
@@ -157,11 +161,13 @@ export class Worker {
     } catch (error) {
       if (controller.signal.aborted) {run.status = 'stopped'; run.message = '已停止，可继续';}
       else if (/AUTH|LOGIN|SESSION|PERMISSION/.test(String((error as {code?:string}).code || ''))) {
+        this.report?.('collection_auth_required', {runId:run.id});
         run.status = 'auth_required'; run.message = '登录失效或权限不足，请更新Cookie并验证后继续';
         const shop = this.store.getShop(run.shopId);
         if (shop && this.store.getCredentialVersion(run.shopId) === credentialVersion)
           this.store.saveShop({...shop, sessionStatus:'auth_required', lastError:run.message, updatedAt:now()});
       } else {
+        this.report?.('collection_failed', {runId:run.id});
         run.status = 'failed'; run.finishedAt = now(); run.message = '采集失败，请查看账号状态或重试';
         if (run.scope === 'selected') run.productIds.filter(id => !completed.has(id)).forEach(id => failures.add(id));
         if (run.trigger === 'scheduled') run.alertDispatchStatus = 'skipped';
@@ -173,7 +179,7 @@ export class Worker {
     }
     if (run.trigger === 'scheduled' && run.finishedAt && ['success', 'partial'].includes(run.status) && this.onCompleted) {
       // Failure here leaves a durable pending dispatch; startup recovery can safely retry it.
-      try {await this.onCompleted(run);} catch {/* Collection success is independent of alert dispatch. */}
+      try {await this.onCompleted(run);} catch {this.report?.('alert_dispatch_failed', {runId:run.id});}
     }
   }
 

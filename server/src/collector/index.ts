@@ -1,22 +1,46 @@
 import type { Collector, CollectOptions, CollectedRow } from '../../../shared/contracts.js';
 import { exportCookies } from './cookies.js';
 import { checkAbort, CollectorError } from './errors.js';
-import { Client, backend, fail, fatal, pageInvariant, platforms, validId, type BackendProduct, type Page, type CollectorConfiguration } from './client.js';
+import { Client, backend, fail, fatal, pageInvariant, platforms, validId, type Page, type CollectorConfiguration } from './client.js';
 export { CollectorError } from './errors.js';
 export { defaultHttpTransport, Semaphore, globalLimiter } from './http.js';
 export type { HttpTransport, HttpRequest, HttpResponse, RequestLimiter } from './http.js';
 export type { CollectorConfiguration } from './client.js';
 export type { Collector } from '../../../shared/contracts.js';
+const MAX_VERIFICATION_PAGES_PER_TAB = 5;
+
+async function findVerificationProduct(client: Client, signal: AbortSignal): Promise<string> {
+    const listing = new Set<string>(), sku = new Set<string>();
+    let listingBaseline: Page | undefined, skuBaseline: Page | undefined;
+    for (let current = 1; current <= MAX_VERIFICATION_PAGES_PER_TAB; current++) {
+        if (!listingBaseline || current <= Math.ceil(listingBaseline.total / listingBaseline.pageSize)) {
+            const page = await client.page('on_sale', current, listingBaseline?.pageSize ?? 100, signal);
+            pageInvariant(page, listingBaseline, listing);
+            listingBaseline ??= page;
+            const common = page.products.find(product => sku.has(product.productId));
+            if (common)
+                return common.productId;
+        }
+        if (!skuBaseline || current <= Math.ceil(skuBaseline.total / skuBaseline.pageSize)) {
+            const page = await client.page('on_sale_skucenter', current, skuBaseline?.pageSize ?? 100, signal);
+            pageInvariant(page, skuBaseline, sku);
+            skuBaseline ??= page;
+            const common = page.products.find(product => listing.has(product.productId));
+            if (common)
+                return common.productId;
+        }
+        if (!listingBaseline.total || !skuBaseline.total || (listing.size === listingBaseline.total && sku.size === skuBaseline.total))
+            break;
+    }
+    fail('IDENTITY_UNVERIFIED', '在核验范围内未找到同时存在于商品列表和 SKU 后台的商品，无法核验店铺身份');
+}
+
 export function createCollector(configuration: CollectorConfiguration = {}): Collector {
     return {
         async verify(credentials, signal = new AbortController().signal) {
             const client = new Client(credentials, configuration);
-            const list = await client.page('on_sale', 1, 100, signal);
-            const sku = await client.page('on_sale_skucenter', 1, 100, signal);
-            const sample = list.products.find(p => sku.products.some(s => s.productId === p.productId));
-            if (!sample)
-                fail('IDENTITY_UNVERIFIED', '未找到同时存在于商品列表和 SKU 后台的商品，无法核验店铺身份');
-            const detail = await client.detail(sample.productId, signal);
+            const productId = await findVerificationProduct(client, signal);
+            const detail = await client.detail(productId, signal);
             client.http.assertIdentity();
             checkAbort(signal);
             return { ...detail.identity, platform: client.platform.id, cookies: exportCookies(client.http.jar), userAgent: client.http.userAgent, appKey: client.appKey };
@@ -35,7 +59,7 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
     const failedProductIds: string[] = [];
     const progress = async (phase: string, message: string) => { checkAbort(signal); client.http.assertIdentity(); await options.onProgress({ phase, expected, processed, failed: failedProductIds.length, message }); checkAbort(signal); };
     await progress('discovering', '正在核验后台商品范围');
-    const wanted = new Set(selected ?? []), discovered = new Map<string, BackendProduct>();
+    const wanted = new Set(selected ?? []), discovered = new Map<string, string>();
     let baseline: Page | undefined;
     const listingSeen = new Set<string>();
     for (let current = 1; !baseline || current <= Math.ceil(baseline.total / baseline.pageSize); current++) {
@@ -45,7 +69,7 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
         baseline ??= page;
         for (const p of page.products)
             if (!selected || wanted.has(p.productId))
-                discovered.set(p.productId, p);
+                discovered.set(p.productId, p.title);
         expected = selected ? selected.filter(id => !skip.has(id)).length : baseline.total - [...skip].filter(id => listingSeen.has(id)).length;
         await progress('discovering', `已读取商品列表第 ${current} 页`);
         if (selected && selected.every(id => discovered.has(id)))
@@ -57,7 +81,8 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
     const commit = async (productId: string, title: string, rows: CollectedRow[], error?: string) => {
         checkAbort(signal);
         client.http.assertIdentity();
-        await options.onProduct({ productId, title, rows, ...(error ? { error } : {}) });
+        const skuSetComplete = !error && rows.length > 0 && rows.every(row => row.status === 'ok');
+        await options.onProduct({ productId, title, rows, ...(error ? { error } : {}), ...(skuSetComplete ? { skuSetComplete } : {}) });
         processed++;
         if (error)
             failedProductIds.push(productId);
@@ -82,20 +107,29 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
                 }
                 let front: any[] = [];
                 let at: string | null = null, error: string | undefined;
+                let backendRows: any[] = [];
+                try {
+                    backendRows = client.backendRows(product, page.at);
+                }
+                catch (e) {
+                    if (!(e instanceof CollectorError) || e.code !== 'BACKEND_SKU_INVALID')
+                        throw e;
+                    error = e.message;
+                }
                 try {
                     const detail = await client.detail(id, signal);
                     if (detail.identity.sellerId !== credentials.sellerId)
                         fail('IDENTITY_CHANGED', '商品实际卖家与绑定店铺不一致，已停止采集');
-                    front = detail.rows;
+                    front = client.detailRows(detail, id);
                     at = detail.at;
                 }
                 catch (e) {
                     if (fatal(e))
                         throw e;
-                    error = e instanceof CollectorError ? e.message : '详情读取失败';
+                    error ??= e instanceof CollectorError ? e.message : '详情读取失败';
                 }
                 const rows: CollectedRow[] = [], sourceUrl = platforms.productUrl(client.platform.id, id);
-                const attached = backend.attach(front, product.rows), frontIds = new Set(front.map(row => row.skuId));
+                const attached = backend.attach(front, backendRows), frontIds = new Set(front.map(row => row.skuId));
                 for (const row of attached) {
                     const complete = row.backendVerified && row.before !== '' && row.after !== '' && row.status === '完整';
                     rows.push({ shopId: options.shopId, productId: id, skuId: row.skuId, title: row.title || product.title, specs: row.specs, seatSpec: row.seatSpec, color: row.color,
@@ -103,7 +137,7 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
                         status: complete ? 'ok' : 'partial', ...(!complete ? { error: row.status === '完整' ? row.backendStatus : row.status } : {}), sourceUrl, backendSource: row.backendSource || client.platform.api,
                         detailFetchedAt: at, backendFetchedAt: row.backendFetchedAt || null, stock: row.backendQuantity !== '' ? row.backendQuantity : typeof row.quantity === 'number' ? row.quantity : null });
                 }
-                for (const row of product.rows)
+                for (const row of backendRows)
                     if (!frontIds.has(row.skuId))
                         rows.push({ shopId: options.shopId, productId: id, skuId: row.skuId, title: product.title, specs: row.specs ?? '', seatSpec: '', color: '',
                             backendPrice: row.backendPrice, before: null, after: null, backendVerified: true, status: 'backend_only', error: error ?? '详情中没有该后台 SKU', sourceUrl, backendSource: client.platform.api,
@@ -119,7 +153,7 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
     for (const id of selected ?? discovered.keys()) {
         if (skip.has(id) || done.has(id))
             continue;
-        await commit(id, discovered.get(id)?.title ?? '', [], discovered.has(id) ? 'SKU 后台未找到此商品，无法核验后台价格' : '所选店铺的在售商品后台未找到此商品');
+        await commit(id, discovered.get(id) ?? '', [], discovered.has(id) ? 'SKU 后台未找到此商品，无法核验后台价格' : '所选店铺的在售商品后台未找到此商品');
     }
     for (const id of selected ?? skip)
         if (skip.has(id) && (!discovered.has(id) || !backendSeen.has(id)) && !failedProductIds.includes(id))

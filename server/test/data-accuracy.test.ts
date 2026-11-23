@@ -43,6 +43,18 @@ it('returns exact row-count deltas for duplicate callbacks and replacement of fa
  expect(store.saveProduct('r1',{productId:'1000001',title:'',rows:[row('a'),row('b')],skuSetComplete:true})).toBe(0);
  expect(store.countRunPrices('r1')).toBe(2);
 });
+it('reconciles a resumed partial product after an intervening run retired its previous SKUs',()=>{
+ const {store,start,row}=fixture();const first=start('r1');
+ store.saveProduct('r1',{productId:'1000001',title:'',rows:[row('a'),row('b',{after:null,status:'partial'})]});
+ store.saveRun({...first,status:'stopped'});
+ const other=start('r2');store.saveProduct('r2',{productId:'1000001',title:'',skuSetComplete:true,rows:[row('c')]});
+ store.saveRun({...other,status:'success',finishedAt:at});
+ store.saveRun({...first,status:'running'});
+ expect(store.saveProduct('r1',{productId:'1000001',title:'',skuSetComplete:true,rows:[row('a',{after:'72'}),row('d',{after:'68'})]})).toBe(0);
+ expect(store.getRunPrices('r1').map(value=>[value.skuId,value.after])).toEqual([['a','72.00'],['d','68.00']]);
+ expect(store.queryAll({view:'sku',sort:'skuId',order:'asc'}).map(value=>[('skuId'in value?value.skuId:''),('after'in value?value.after:null)])).toEqual([['a','72.00'],['d','68.00']]);
+ expect(store.getRunPrices('r2').map(value=>value.skuId)).toEqual(['c']);
+});
 it('preserves product aggregate fields when exporting annotations or expanded SKU detail',()=>{
  const {store,start,row}=fixture();start('r1');
  store.saveProduct('r1',{productId:'1000001',title:'',rows:[row('a'),row('b',{status:'partial',after:null})]});

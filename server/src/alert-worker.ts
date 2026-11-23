@@ -1,5 +1,6 @@
 import type {Store, AlertRunRecord} from './database.js';
 import {evaluateRules, whitelistReason} from './domain.js';
+import type {DiagnosticReporter} from './diagnostics.js';
 
 const now = () => new Date().toISOString();
 
@@ -9,7 +10,7 @@ export class AlertWorker {
   private delivering: Promise<void> | null = null;
   private notificationQueue = new Set<string>();
   private closed = false;
-  constructor(private store: Store, private notify?: (run: AlertRunRecord) => Promise<void>) {}
+  constructor(private store: Store, private notify?: (run: AlertRunRecord) => Promise<void>, private report?: DiagnosticReporter) {}
 
   enqueueForCollection(collectionRunId: string): void {
     this.store.transaction(() => {
@@ -43,7 +44,10 @@ export class AlertWorker {
       this.store.setConfig('notification.error', '服务中断前有通知正在发送，投递结果未知，请先核对已收到的消息再决定是否重试');
     }
     for (const run of this.store.pendingAlertNotifications()) this.queueNotification(run);
-    for (const source of this.store.pendingAlertCollections()) this.enqueueForCollection(source.id);
+    for (const source of this.store.pendingAlertCollections()) {
+      try {this.enqueueForCollection(source.id);}
+      catch (error) {this.report?.('alert_dispatch_failed', {runId:source.id}); throw error;}
+    }
     this.kick();
   }
 
@@ -62,6 +66,7 @@ export class AlertWorker {
       if (!run) break;
       try {await this.execute(run);}
       catch {
+        this.report?.('alert_evaluation_failed', {runId:run.collectionRunId,evaluationId:run.id});
         const saved = this.store.getAlertRun(run.id);
         if (saved && !saved.finishedAt) {
           saved.status = 'failed'; saved.finishedAt = now(); saved.message = '预警检查失败，采集结果已保留';
@@ -115,6 +120,7 @@ export class AlertWorker {
         if (!run || run.notificationStatus !== 'pending') continue;
         try {await this.notify!(run);}
         catch {
+          this.report?.('notification_failed', {runId:run.collectionRunId,evaluationId:run.id});
           const saved = this.store.getAlertRun(id)!;
           if (saved.notificationStatus !== 'accepted') {saved.notificationStatus = 'failed'; this.store.saveAlertRun(saved);}
         }

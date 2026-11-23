@@ -243,5 +243,5 @@
         priceType:priceType(row.after, match.row.backendPrice)};
     });
   }
-  return {parsePage, fetchForProducts, attach};
+  return {parsePage, fetchForProducts, attach, normalizeProduct};
 });

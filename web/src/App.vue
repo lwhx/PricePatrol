@@ -6,10 +6,11 @@ import AuthPage from './pages/AuthPage.vue';
 import ErrorBanner from './components/ErrorBanner.vue';
 const route = useRoute();
 const configured = ref(false), authenticated = ref(false), checking = ref(true), error = ref('');
+const setupTokenRequired = ref(false);
 const nav = [ ['/', '◈', '工作总览'], ['/shops', '▣', '店铺账号'], ['/prices', '▤', '商品价格'], ['/tasks', '◷', '采集任务'], ['/alert-tasks', '◉', '预警任务'], ['/alerts', '◇', '预警记录'], ['/settings', '⚙', '系统设置'] ];
 async function refreshAuth() {
   error.value = ''; checking.value = true;
-  try { const result = await get<{ configured: boolean; authenticated: boolean }>('/auth/status'); configured.value = result.configured; authenticated.value = result.authenticated; }
+  try { const result = await get<{ configured: boolean; authenticated: boolean; setupTokenRequired: boolean }>('/auth/status'); configured.value = result.configured; authenticated.value = result.authenticated; setupTokenRequired.value = result.setupTokenRequired; }
   catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
   finally { checking.value = false; }
 }
@@ -24,7 +25,7 @@ onUnmounted(() => window.removeEventListener('session-expired', expired));
 <template>
   <div v-if="checking" class="boot-state"><div class="brand-mark">价</div><p>正在连接管理服务…</p></div>
   <div v-else-if="error && !authenticated" class="boot-state"><ErrorBanner :message="error" /><el-button @click="refreshAuth">重新连接</el-button></div>
-  <AuthPage v-else-if="!authenticated" :configured="configured" @authenticated="refreshAuth" />
+  <AuthPage v-else-if="!authenticated" :configured="configured" :setup-token-required="setupTokenRequired" @authenticated="refreshAuth" />
   <div v-else class="app-shell">
     <aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">价</span><span>价巡<small>电商价格监控</small></span></a>
       <div class="nav-caption">工作空间</div><nav><router-link v-for="[path, icon, label] in nav" :key="path" :to="path" :class="{ active: path === '/' ? route.path === '/' : route.path.startsWith(path!) }"><span class="nav-icon">{{ icon }}</span>{{ label }}</router-link></nav>

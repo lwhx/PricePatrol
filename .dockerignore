@@ -4,6 +4,8 @@ data
 .local
 .env
 .env.*
+**/.setup-token
+**/.setup-token-*.tmp
 web/dist
 *.sqlite*
 *.db

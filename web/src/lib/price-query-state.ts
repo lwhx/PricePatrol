@@ -4,6 +4,22 @@ const storageKey = 'price-monitor:price-query';
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const fields = new Set(['discount', 'backendPrice', 'before', 'after', 'saving', 'priceDifference', 'title', 'specs', 'productId', 'skuId', 'status']);
 const operators = new Set(['lt', 'lte', 'eq', 'ne', 'gte', 'gt', 'between', 'contains', 'notContains', 'in', 'notIn']);
+
+export function toDateTimeLocal(value?: string): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, -1).replace(/:00\.000$/, '').replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
+export function fromDateTimeLocal(value: string | undefined, previous?: string): string | undefined {
+  if (!value) return undefined;
+  // A fall-back DST hour may represent two instants. Keep the original instant if untouched.
+  if (previous && toDateTimeLocal(previous) === value) return previous;
+  return new Date(value).toISOString();
+}
+
 /** Whitelist the shape before restoring legacy URLs or browser storage into reactive UI fields. */
 export function normalizePriceQuery(value: unknown): QueryInput | null {
   if (!object(value)) return null;
@@ -16,7 +32,7 @@ export function normalizePriceQuery(value: unknown): QueryInput | null {
     if (typeof value[key] === 'string' && value[key].length <= 200) query[key] = value[key];
   }
   for (const key of ['from', 'to'] as const) {
-    if (typeof value[key] === 'string' && Number.isFinite(Date.parse(value[key]))) query[key] = value[key];
+    if (typeof value[key] === 'string' && Number.isFinite(Date.parse(value[key]))) query[key] = new Date(value[key]).toISOString();
   }
   if (value.view === 'sku' || value.view === 'product') query.view = value.view;
   if (value.matchMode === 'any' || value.matchMode === 'all') query.matchMode = value.matchMode;

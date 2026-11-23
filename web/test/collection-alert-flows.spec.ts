@@ -56,6 +56,12 @@ describe('采集与预警分离交互', () => {
     expect(body).not.toHaveProperty('rules'); expect(body).not.toHaveProperty('whitelist'); expect(body).not.toHaveProperty('notify');
     expect(wrapper.text()).not.toContain('预警条件'); expect(router.currentRoute.value.path).toBe('/tasks');
   });
+  it('保存现有采集任务时发送打开编辑页时的版本', async () => {
+    const { wrapper } = await open(TaskEditPage, `/tasks/${collection.id}/edit`);
+    await wrapper.get('[data-label="任务名称"] input').setValue('修改采集名称');
+    await button(wrapper, '保存任务').trigger('click'); await flushPromises();
+    expect(patchMock).toHaveBeenCalledExactlyOnceWith(`/tasks/${collection.id}`, expect.objectContaining({ expectedVersion: collection.version, name: '修改采集名称' }));
+  });
   it('有每日计划的采集任务仍使用手动采集入口并明确不会触发预警', async () => {
     const { wrapper } = await open(TasksPage, '/tasks');
     expect(wrapper.text()).toContain('手动采集不触发预警');

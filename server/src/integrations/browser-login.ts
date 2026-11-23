@@ -16,7 +16,7 @@ export interface LoginAction {type: 'click'|'type'|'press'|'drag'; x?: number; y
 interface LoginSession {context: BrowserContext; page: Page; touchedAt: number; tail: Promise<unknown>}
 
 // Only messages constructed here are safe to expose through the API handler.
-class BrowserLoginError extends Error {readonly statusCode = 400;}
+export class BrowserLoginError extends Error {readonly statusCode = 400;}
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const inViewport = (x: unknown, y: unknown): boolean =>

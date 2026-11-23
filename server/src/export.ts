@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import type {ExportInput,ExportResult,PriceRow,ProductRow} from '../../shared/contracts.js';
 import type {Store} from './database.js';
+import {HttpError} from './api-context.js';
 import {readSnapshot,queryAllStore} from './query.js';
 const headers:Record<string,string>={shopId:'店铺ID',shopName:'店铺',productId:'商品ID',title:'标题',sourceUrl:'商品链接',skuId:'SKU ID',specs:'完整规格',seatSpec:'座位规格',color:'颜色',backendPrice:'后台标价',before:'优惠前价',after:'优惠后价',discount:'实际折扣',saving:'优惠金额',priceDifference:'价格差额',detailFetchedAt:'详情采集时间',backendFetchedAt:'后台采集时间',updatedAt:'更新时间',status:'状态',error:'错误原因',note:'备注',tags:'标签',skuCount:'SKU数',matchedSkuCount:'命中SKU数',unknownCount:'未知SKU数',minDiscount:'最低折扣',maxDiscount:'最高折扣',minAfter:'最低优惠后价',maxAfter:'最高优惠后价',skuIds:'SKU列表',stock:'库存',id:'记录ID',stale:'陈旧数据',backendSource:'后台来源',backendVerified:'后台已核验',runId:'作业ID'};
 type Row=PriceRow|ProductRow;
@@ -9,7 +10,7 @@ const productKey=(row:Row)=>JSON.stringify([row.shopId,row.productId]);
 function cell(row:Row,field:string):string{const value=(row as unknown as Record<string,unknown>)[field];return value==null?'':Array.isArray(value)?value.join('、'):String(value);}
 function setup(store:Store):void{store.db.exec('CREATE TABLE IF NOT EXISTS export_snapshots(token TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,payload TEXT NOT NULL)');store.db.prepare('DELETE FROM export_snapshots WHERE expires_at<=?').run(Date.now());}
 export function buildExport(store:Store,input:ExportInput):ExportResult{
- const fields=input.format==='ids'?['productId']:input.format==='titles'?['title']:input.format==='id-title'?['productId','title']:[...input.fields];if(!fields.length||fields.some(field=>!Object.hasOwn(headers,field)))throw Error('无效导出字段');
+ const fields=input.format==='ids'?['productId']:input.format==='titles'?['title']:input.format==='id-title'?['productId','title']:[...input.fields];if(!fields.length||fields.some(field=>!Object.hasOwn(headers,field)))throw new HttpError(400,'无效导出字段');
  let sourceCount=0;
  const rows=readSnapshot(store,()=>{
   let rows=input.scope==='page'?store.query(input.query).rows:queryAllStore(store,input.query,input.scope==='selected'?(input.selectedIds||[]):undefined);
@@ -34,7 +35,7 @@ export function buildExport(store:Store,input:ExportInput):ExportResult{
  const safe=(value:string,field:string)=>!numeric.has(field)&&/^[\s\u0000-\u001f]*[=+@-]/.test(value)?`'${value}`:value;
  const escaped=(value:string,separator:string)=>{let text=value.replace(/\\/g,'\\\\').replace(/\r/g,'\\r').replace(/\n/g,'\\n').replace(/\t/g,'\\t');if(separator&&!['\t','\n','\r'].includes(separator))text=text.split(separator).join(`\\${separator}`);return text;};
  const formats:Record<ExportInput['format'],[string,string]>={ids:['txt','text/plain'],titles:['txt','text/plain'],'id-title':['txt','text/plain'],tsv:['tsv','text/tab-separated-values'],csv:['csv','text/csv'],text:['txt','text/plain'],json:['json','application/json'],markdown:['md','text/markdown']};
- if(!formats[input.format])throw Error('无效导出格式');
+ if(!formats[input.format])throw new HttpError(400,'无效导出格式');
  const render=(rows:Row[]):string=>{
   if(input.format==='json')return JSON.stringify(rows.map(row=>Object.fromEntries(fields.map(field=>[field,(row as unknown as Record<string,unknown>)[field]??null]))),null,2);
   const labels=fields.map(field=>headers[field]!);

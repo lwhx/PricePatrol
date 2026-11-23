@@ -41,9 +41,9 @@ export async function notifyAlertRun(store:Store,vault:Vault,input:AlertRunRecor
   }
 }
 export function registerSettings(ctx:ApiContext):void{
-  const {app,store,vault}=ctx;const settings=()=>({notification:notificationSettings(store),retentionDays:store.getConfig('retentionDays',180),timezone:'Asia/Shanghai'});
+  const {app,store,vault}=ctx;const settings=()=>({notification:notificationSettings(store),retentionDays:ctx.maintenance.getSettings().retentionDays,timezone:'Asia/Shanghai'});
   app.get('/api/settings',async()=>settings());
-  app.put('/api/settings',async request=>{const input=z.object({sendKey:z.string().trim().max(1000).optional(),notificationEnabled:z.boolean().optional(),retentionDays:z.number().int().min(7).max(3650).optional()}).parse(request.body);if(input.sendKey!==undefined)store.setConfig('notification.key',input.sendKey?vault.seal(input.sendKey):'');if(input.notificationEnabled!==undefined)store.setConfig('notification.enabled',input.notificationEnabled);if(input.retentionDays!==undefined)store.setConfig('retentionDays',input.retentionDays);store.setConfig('notification.error',null);return settings();});
+  app.put('/api/settings',async request=>{const input=z.object({sendKey:z.string().trim().max(1000).optional(),notificationEnabled:z.boolean().optional(),retentionDays:z.number().int().min(7).max(3650).optional()}).parse(request.body);if(input.retentionDays!==undefined)ctx.maintenance.updateSettings({retentionDays:input.retentionDays});if(input.sendKey!==undefined)store.setConfig('notification.key',input.sendKey?vault.seal(input.sendKey):'');if(input.notificationEnabled!==undefined)store.setConfig('notification.enabled',input.notificationEnabled);store.setConfig('notification.error',null);return settings();});
   app.post('/api/notifications/test',async()=>{const key=getKey(store,vault);try{const result=await sendServerChan(key,{title:'电商价格监控通知测试',description:'Server酱通知连接测试。此消息由管理界面手动触发。'});if(!result.accepted)throw Error();return {accepted:true};}catch{throw new HttpError(502,'Server酱测试发送失败，请检查SendKey、网络或额度');}});
   app.post<{Params:{id:string}}>('/api/runs/:id/notify',async request=>{requireValue(store.getRun(request.params.id));throw new HttpError(400,'采集任务不发送预警，请使用 /api/alert-runs/:id/notify 重试独立预警汇总');});
 }

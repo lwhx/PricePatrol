@@ -1,11 +1,11 @@
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID} from 'node:crypto';
-import {mkdirSync,rmSync,existsSync} from 'node:fs';
-import {dirname,resolve} from 'node:path';
+import {backupDatabase} from './backup.js';
 import {Vault} from './security.js';
 import {queryStore,queryAllStore,registerQueryFunctions} from './query.js';
 import {moneyCents,formatDiscount,rowKey} from './domain.js';
 import {migrateCollectionAlerts} from './migrations.js';
+import {COLLECTION_SUBMISSION_TTL_MS} from './collection-submissions.js';
 import type {Run,RunStatus,CollectionTask,AlertTask,AlertRun,Shop,VerifiedAccount,ProductCollection,PriceRow,Alert,QueryInput,QueryResult,ProductRow,Overview} from '../../shared/contracts.js';
 // Serialize integer cents without routing through floating-point division.
 function moneyText(cents:number|null):string|null{if(cents===null)return null;const integer=BigInt(cents),absolute=integer<0n?-integer:integer;return `${integer<0n?'-':''}${absolute/100n}.${String(absolute%100n).padStart(2,'0')}`;}
@@ -124,12 +124,20 @@ export class Store {
   }
   return this.transaction(()=>{
    let inserted=0;
+   const complete=product.skuSetComplete===true&&!product.error&&product.rows.every(row=>row.status==='ok');
+   if(complete){
+    const priorProduct=this.readMany<PriceRow>('SELECT payload FROM prices WHERE run_id=? AND shop_id=? AND product_id=?',runId,run.shopId,product.productId);
+    // An unfinished partial product is one replaceable snapshot. Refresh all its
+    // SKUs together so a resumed authoritative result cannot retain stale success
+    // evidence while losing current rows after another run changed the SKU set.
+    if(priorProduct.some(row=>row.status!=='ok'||row.stale))inserted-=Number(this.db.prepare('DELETE FROM prices WHERE run_id=? AND shop_id=? AND product_id=?').run(runId,run.shopId,product.productId).changes);
+   }
    const existing=this.readMany<PriceRow>('SELECT payload FROM latest WHERE shop_id=? AND product_id=?',run.shopId,product.productId);
    const existingById=new Map(existing.map(row=>[row.id,row]));
    const sources=[...product.rows];
    if(product.error){for(const old of existing)if(!sources.some(r=>rowKey(r)===old.id))sources.push({...old,status:'stale',error:product.error});}
    if(!sources.length&&product.error)sources.push({shopId:run.shopId,productId:product.productId,skuId:'',title:product.title,specs:'',seatSpec:'',color:'',backendPrice:null,before:null,after:null,backendVerified:false,status:'error',error:product.error,sourceUrl:'',backendSource:'',detailFetchedAt:null,backendFetchedAt:null,stock:null});
-   // A resumed batch can replace its own failed placeholder, but never completed evidence.
+   // Legacy collectors without an authoritative set can still replace a failed placeholder.
    if(!run.finishedAt&&!product.error&&sources.length&&sources.every(row=>row.status==='ok')){
     inserted-=Number(this.db.prepare("DELETE FROM prices WHERE run_id=? AND shop_id=? AND product_id=? AND sku_id='' AND json_extract(payload,'$.status')!='ok'").run(runId,run.shopId,product.productId).changes);
     this.db.prepare("DELETE FROM latest WHERE shop_id=? AND product_id=? AND sku_id='' AND json_extract(payload,'$.status')!='ok'").run(run.shopId,product.productId);
@@ -150,7 +158,7 @@ export class Store {
    }
    // Absence is meaningful only when the collector explicitly verified the whole
    // SKU set. Failed/partial responses must never remove known current prices.
-   if(product.skuSetComplete===true&&!product.error&&product.rows.every(row=>row.status==='ok')){
+   if(complete){
     this.db.prepare('DELETE FROM latest WHERE shop_id=? AND product_id=? AND id NOT IN(SELECT value FROM json_each(?))').run(run.shopId,product.productId,JSON.stringify(product.rows.map(rowKey)));
    }
    return inserted;
@@ -177,7 +185,10 @@ export class Store {
  updateAlert(id:string,patch:Partial<Pick<Alert,'state'|'note'>>):Alert{
   if(Object.keys(patch).some(key=>!['state','note'].includes(key)))throw Error('只允许更新预警状态和备注');
   if(patch.state&&!['pending','confirmed','resolved'].includes(patch.state))throw Error('无效预警状态');
-  const old=this.getAlert(id);if(!old)throw Error('预警不存在');const alert={...old,...patch};this.db.prepare('UPDATE alerts SET payload=? WHERE id=?').run(JSON.stringify(alert),id);return alert;
+  const old=this.getAlert(id);if(!old)throw Error('预警不存在');const alert={...old,...patch};
+  if(patch.state==='resolved'&&old.state!=='resolved')alert.resolvedAt=new Date().toISOString();
+  else if(patch.state&&patch.state!=='resolved')delete alert.resolvedAt;
+  this.db.prepare('UPDATE alerts SET payload=? WHERE id=?').run(JSON.stringify(alert),id);return alert;
  }
  annotate(shopId:string,productIds:string[],tags?:string[],note?:string):number{
   if(!this.getShop(shopId))throw Error('店铺不存在');
@@ -198,9 +209,12 @@ export class Store {
  cleanup(before:string):number{
   if(!Number.isFinite(Date.parse(before)))throw Error('无效清理时间');
   return this.transaction(()=>{
-   const eligible=`SELECT id FROM runs WHERE json_extract(payload,'$.finishedAt') IS NOT NULL AND julianday(json_extract(payload,'$.finishedAt'))<julianday(?) AND coalesce(json_extract(payload,'$.alertDispatchStatus'),'not_applicable')!='pending' AND id NOT IN(SELECT run_id FROM alerts) AND id NOT IN(SELECT collection_run_id FROM alert_runs)`;
-   const prices=this.db.prepare(`DELETE FROM prices WHERE run_id IN(${eligible})`).run(before);
-   const runs=this.db.prepare(`DELETE FROM runs WHERE id IN(${eligible}) AND id NOT IN(SELECT run_id FROM latest)`).run(before);
+   const hasReceipts=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='collection_submissions' AND type='table'").get();
+   const protectedReceipts=hasReceipts?' AND id NOT IN(SELECT run_id FROM collection_submissions WHERE submitted_at>?)':'';
+   const args=hasReceipts?[before,Date.now()-COLLECTION_SUBMISSION_TTL_MS]:[before];
+   const eligible=`SELECT id FROM runs WHERE json_extract(payload,'$.finishedAt') IS NOT NULL AND julianday(json_extract(payload,'$.finishedAt'))<julianday(?) AND coalesce(json_extract(payload,'$.alertDispatchStatus'),'not_applicable')!='pending' AND id NOT IN(SELECT run_id FROM alerts) AND id NOT IN(SELECT collection_run_id FROM alert_runs)${protectedReceipts}`;
+   const prices=this.db.prepare(`DELETE FROM prices WHERE run_id IN(${eligible})`).run(...args);
+   const runs=this.db.prepare(`DELETE FROM runs WHERE id IN(${eligible}) AND id NOT IN(SELECT run_id FROM latest)`).run(...args);
    return Number(prices.changes)+Number(runs.changes);
   });
  }
@@ -208,11 +222,7 @@ export class Store {
   const scalar=(sql:string)=>Number(this.db.prepare(sql).get()?.n||0);
   return {shops:scalar('SELECT count(*) n FROM shops'),tasks:scalar('SELECT count(*) n FROM tasks WHERE deleted=0'),alertTasks:scalar('SELECT count(*) n FROM alert_tasks WHERE deleted=0'),products:scalar('SELECT count(*) n FROM(SELECT 1 FROM latest GROUP BY shop_id,product_id)'),skus:scalar('SELECT count(*) n FROM latest'),pendingAlerts:scalar("SELECT count(*) n FROM alerts WHERE json_extract(payload,'$.state')='pending'"),running:scalar("SELECT count(*) n FROM runs WHERE json_extract(payload,'$.status') IN('queued','running')"),failedRows:scalar("SELECT count(*) n FROM latest WHERE json_extract(payload,'$.stale')=1 OR json_extract(payload,'$.status')!='ok'"),recentRuns:this.listRuns().slice(0,10).map(({taskSnapshot:_,alertTaskSnapshots:__,...run})=>run)};
  }
- async backup(destination:string):Promise<void>{
-  const target=resolve(destination);if(existsSync(target))throw Error('备份目标已存在');mkdirSync(dirname(target),{recursive:true});
-  try{this.db.prepare('VACUUM INTO ?').run(target);const check=new DatabaseSync(target,{readOnly:true});try{if(check.prepare('PRAGMA quick_check').get()?.quick_check!=='ok')throw Error('备份完整性检查失败');}finally{check.close();}}
-  catch(error){rmSync(target,{force:true});throw error;}
- }
+ backup(destination:string):Promise<void>{return backupDatabase(this.db,destination);}
  query(input:QueryInput):QueryResult{return queryStore(this,input);}
  queryAll(input:QueryInput):(PriceRow|ProductRow)[]{return queryAllStore(this,input);}
  private readOne<T>(sql:string,...args:string[]):T|undefined{const record=this.db.prepare(sql).get(...args);return record?JSON.parse(String(record.payload)) as T:undefined;}

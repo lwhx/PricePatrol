@@ -18,8 +18,13 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      build_time: ${{ steps.identity.outputs.build_time }}
     steps:
       - uses: actions/checkout@v7
+      - name: Record build timestamp
+        id: identity
+        run: printf 'build_time=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -35,11 +40,19 @@ jobs:
       - name: Compose configuration validation (ephemeral key)
         run: |
           encryption_key=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
-          ENCRYPTION_KEY="$encryption_key" docker compose config --quiet
+          check_compose() {
+            ADMIN_PASSWORD='ci-admin-password' SETUP_TOKEN='ci-compose-config-test-setup-token' docker compose "$@" config --format json | node -e '
+              const {environment, ports, volumes} = JSON.parse(require("node:fs").readFileSync(0, "utf8")).services.app;
+              if (environment.ADMIN_PASSWORD !== "ci-admin-password" || environment.SETUP_TOKEN !== "ci-compose-config-test-setup-token") process.exit(1);
+              if (environment.BACKUP_DIR !== "/app/backups" || !volumes.some(v => v.target === "/app/backups")) process.exit(1);
+              if (!ports.some(p => Number(p.published) === 6300 && Number(p.target) === 3000 && !p.host_ip)) process.exit(1);
+            '
+          }
+          ENCRYPTION_KEY="$encryption_key" check_compose
           # 单独抄走 deploy/ 的文件也必须能启动，防止部署文件与根 compose 悄悄漂移。
           deploy_env=$(mktemp)
           sed "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$encryption_key|" deploy/.env.example > "$deploy_env"
-          docker compose -f deploy/compose.yaml --env-file "$deploy_env" config --quiet
+          check_compose -f deploy/compose.yaml --env-file "$deploy_env"
 
   image:
     needs: verify
@@ -75,6 +88,9 @@ jobs:
           platforms: ${{ matrix.platform }}
           load: true
           tags: price-monitor-ci:local
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            BUILD_TIME=${{ needs.verify.outputs.build_time }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       - name: Exercise Chromium and data directory in the built image
@@ -84,6 +100,8 @@ jobs:
             import {writeFileSync, unlinkSync} from "node:fs";
             writeFileSync("/app/data/.write-probe", "ok");
             unlinkSync("/app/data/.write-probe");
+            writeFileSync("/app/backups/.write-probe", "ok");
+            unlinkSync("/app/backups/.write-probe");
             const browser = await chromium.launch({headless:true});
             try {
               const page = await browser.newPage();
@@ -93,18 +111,43 @@ jobs:
             } finally { await browser.close(); }
           '
       - name: Exercise production node + tsx entrypoint
+        env:
+          EXPECTED_BUILD_TIME: ${{ needs.verify.outputs.build_time }}
         run: |
           encryption_key=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
           docker run --detach --init --name price-monitor-smoke --env ENCRYPTION_KEY="$encryption_key" price-monitor-ci:local
           ready=false
           for attempt in {1..30}; do
-            if docker exec price-monitor-smoke node -e "fetch('http://127.0.0.1:3000/api/auth/status',{signal:AbortSignal.timeout(2000)}).then(async r=>{const s=await r.json();if(!r.ok||s.configured!==false||s.authenticated!==false)process.exit(1)}).catch(()=>process.exit(1))"; then
+            if docker exec price-monitor-smoke node -e "fetch('http://127.0.0.1:3000/api/auth/status',{signal:AbortSignal.timeout(2000)}).then(async r=>{const s=await r.json();if(!r.ok||s.configured!==false||s.authenticated!==false||s.setupTokenRequired!==true)process.exit(1)}).catch(()=>process.exit(1))"; then
               ready=true
               break
             fi
             sleep 1
           done
           test "$ready" = true
+          docker exec --env EXPECTED_BUILD_SHA="$GITHUB_SHA" --env EXPECTED_BUILD_TIME="$EXPECTED_BUILD_TIME" price-monitor-smoke node --input-type=module -e '
+            import {readFileSync, statSync} from "node:fs";
+            import {join} from "node:path";
+            const {BUILD_SHA, BUILD_TIME, EXPECTED_BUILD_SHA, EXPECTED_BUILD_TIME, DATA_DIR} = process.env;
+            if (BUILD_SHA !== EXPECTED_BUILD_SHA || !BUILD_TIME || BUILD_TIME !== EXPECTED_BUILD_TIME) throw new Error("Missing image build identity");
+            const path = join(DATA_DIR, ".setup-token");
+            if ((statSync(path).mode & 0o777) !== 0o600) throw new Error("Invalid setup token file permissions");
+            const token = readFileSync(path, "utf8").trim();
+            const status = await fetch("http://127.0.0.1:3000/api/auth/status").then(response => response.text());
+            if (!token || status.includes(token)) throw new Error("Invalid public setup status");
+            const setup = (payload) => fetch("http://127.0.0.1:3000/api/auth/setup", {
+              method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({password:"ci-ephemeral-password", ...payload})
+            });
+            if ((await setup({})).status !== 403) throw new Error("Setup without token was not rejected");
+            const initialized = await setup({setupToken:token});
+            if (initialized.status !== 200) throw new Error("Setup with token failed");
+            if ((await setup({setupToken:token})).status !== 409) throw new Error("Setup token was accepted twice");
+            const cookie = initialized.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
+            const operations = await fetch("http://127.0.0.1:3000/api/operations", {headers:{cookie}}).then(response => response.json());
+            if (operations.build.sha !== EXPECTED_BUILD_SHA || operations.build.time !== EXPECTED_BUILD_TIME) throw new Error("Runtime build identity missing");
+            const maintenance = await fetch("http://127.0.0.1:3000/api/maintenance/settings", {headers:{cookie}}).then(response => response.json());
+            if (maintenance.cleanupEnabled !== false || maintenance.backupsEnabled !== true || maintenance.backupKeep !== 14) throw new Error("Maintenance defaults changed");
+          '
       - name: Remove smoke container and its ephemeral data volume
         if: always()
         run: docker rm --force --volumes price-monitor-smoke 2>/dev/null || true

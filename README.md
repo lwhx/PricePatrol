@@ -23,6 +23,8 @@
 
 规则、范围、白名单、通知开关和规则版本在**定时采集入队时冻结**。之后修改、暂停或删除预警任务，影响未来批次；已捕获的执行继续使用原快照。停用或删除采集任务会清除其尚未开始的定时采集。手动与定时作业分别去重，不会把手动批次改成定时批次，也不会共用手动采集结果触发预警。
 
+批量重采按店铺展示提交结果，重试只提交失败的组。相同请求凭据在 24 小时内返回原采集批次，避免服务器已接受、网页未收到响应时重复排队。向现有采集任务添加商品使用原子追加；编辑整份任务配置时检查版本，冲突会提示重新读取。
+
 采集记录、预警执行和预警事件分别查看：采集记录说明价格来自哪个批次；预警执行说明检查、排除、命中和无法判断的 SKU 数量；预警事件保留对应价格证据。通知失败只影响该次预警的通知状态，可单独重试，不会重采商品或重新计算预警。旧价、缺价和无法判断的结果不能用于认定价格正常；显式的采集状态异常规则仍可判断 `partial`、`backend_only`、`stale`、`error` 等状态。
 
 ### 从旧组合任务升级
@@ -57,7 +59,7 @@ npx playwright install chromium
 node --env-file=.env --run dev
 ```
 
-访问 `http://localhost:5173`，Vite 将 `/api` 代理至本机 3000 端口。首次访问在初始化页面设置至少 10 字符的管理员密码，管理员 hash 随数据库保留。首次初始化请在本机或受控网络完成。
+访问 `http://localhost:5173`，Vite 将 `/api` 代理至本机 3000 端口。首次访问设置至少 10 字符的管理员密码，管理员 hash 随数据库保留。生产环境首次初始化需要部署者持有的令牌，见下面的“首次管理员初始化”；已有管理员的数据库继续使用原密码。
 
 验证并以单进程提供前端和 API：
 
@@ -144,6 +146,28 @@ Dockerfile 先 `npm ci` 构建前端，运行阶段 `npm ci --omit=dev` 后调�
 
 容器内数据目录 `/app/data` 使用命名卷，默认名 `pricepatrol-data`，可用 `.env` 的 `DATA_VOLUME` 更改。从更早版本升级、数据仍在 `price-monitor-data` 卷时，把 `DATA_VOLUME` 写成旧卷名即可继续读取，无需迁移数据。`docker compose down` 保留数据卷；`down -v` 会删除数据，请勿用于普通升级。更换挂载目录时需保证 UID/GID 1000 可写。
 
+自动备份写入独立的 `/app/backups` 卷，默认卷名 `pricepatrol-backups`，可由 `BACKUP_VOLUME` 更改。两份 Compose 的对外端口保持 `6300:3000`。
+
+### 首次管理员初始化
+
+生产数据库还没有管理员时，可以任选一种方式完成初始化：
+
+- 在 `.env` 设置 10–200 个字符的 `ADMIN_PASSWORD`，首次启动时直接创建管理员。
+- 设置 32–256 个字符的 `SETUP_TOKEN`，打开网页后同时提交令牌和新密码。
+- 两项都留空时，应用在数据目录生成权限为 `0600` 的 `.setup-token`。从服务器读取后在初始化页提交：
+
+```bash
+docker compose exec app cat /app/data/.setup-token
+```
+
+使用 `deploy/compose.yaml` 时在命令中加上相应的 `-f` 和 `--env-file`。令牌不会通过公共状态接口或日志返回。管理员建立后，初始化入口不再接受令牌；重新启动或更改上述变量不会重置已有管理员密码。
+
+### 运行健康
+
+工作总览显示每家店最近一次完整成功采集、距完整成功的时间、连续失败次数，以及采集、预警和通知队列。部分成功会打断“连续失败”，但不会被计为完整成功；停止或等待恢复不算新增失败。定时计划的执行、合并、账号失效、停用和错过计划等原因单独保存，最多保留近 30 天的 1,000 条记录。
+
+设置页显示镜像的构建提交、时间和数据库版本。生产日志使用结构化事件和请求/采集/预警执行标识；不会记录请求体、Cookie、SendKey 或远端响应正文。未知服务端异常返回 500，用户可纠正的输入和业务冲突返回对应的 4xx 状态。
+
 本机开发环境没有 Docker。以上配置与工作流中的镜像检查已在 GitHub Actions 的 `ubuntu-24.04`（amd64）和 `ubuntu-24.04-arm`（arm64）实际跑通：容器内 Chromium 截图、数据目录可写、生产入口初始化状态均通过。目标 Linux 主机的网络出口与平台账号仍需自行验收。
 
 ## GitHub / GHCR 镜像
@@ -191,6 +215,41 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u 你的GitHub用户名 --password-st
 
 优先使用设置页的一致性 SQLite 备份下载（`POST /api/maintenance/backup`，需登录）。运行中仅复制主 `.sqlite`/`.db` 文件会遗漏 WAL，不能作为可靠备份。加密密钥与数据库必须配套保管，数据库下载本身不包含 `.env`；备份含账号密文、管理员 hash 和业务数据，保存到仓库之外的受控位置。
 
+设置页还提供后台备份、保留期限和清理预览：
+
+| 设置 | 默认值 | 行为 |
+| --- | --- | --- |
+| 普通采集历史 | 180 天 | 到期后可以清理普通采集及零命中检查 |
+| 已处理预警证据 | 365 天 | 从处理完成时间起保留，不能短于普通历史 |
+| 自动清理 | 关闭 | 升级不会自行删除旧数据；启用后每天检查 |
+| 定期备份 | 开启，每 24 小时 | 应用启动时检查是否到期，失败后至少间隔 1 小时重试 |
+| 备份保留 | 14 份 | 只轮转本数据库创建的完整备份，不删除其他文件 |
+
+每次清理都先完成本地备份；配置了额外备份目录时，也必须复制成功才清理。备份在工作线程生成，验证数据库完整性后原子发布，文件权限为 `0600`。失败和中断在设置页显示，不把未完成文件计为成功备份。
+
+预览和实际清理使用同一套保护条件。未处理预警、仍在持续的异常、未完成采集/检查、待投递或失败通知、当前最新价格来源和有效的请求去重凭据不会被提前删除。实际执行会重新检查保护条件，因此并发采集时最终数量可能和预览不同。删除依赖记录在同一个事务中完成。
+
+本地备份卷仍在同一台服务器上，无法防止整机或磁盘丢失。需要异机备份时，先由管理员把远端存储挂载到宿主机，例如 `/mnt/pricepatrol-remote`，保证 UID/GID 1000 可写；再创建 `compose.backup.yaml`：
+
+```yaml
+services:
+  app:
+    environment:
+      BACKUP_COPY_DIR: /app/backup-copy
+    volumes:
+      - type: bind
+        source: /mnt/pricepatrol-remote
+        target: /app/backup-copy
+        bind:
+          create_host_path: false
+```
+
+```bash
+docker compose -f docker-compose.yaml -f compose.backup.yaml up -d
+```
+
+只复制 `deploy/` 文件部署时，把第一个 `-f` 改成实际的 `compose.yaml`。应用要求配置的额外目录已经存在；路径只能来自部署环境，网页不能指定服务器文件路径。挂载状态和远端持久性仍由宿主机管理。数据库备份与原 `ENCRYPTION_KEY` 分别保存。
+
 也可以在 Linux **停止应用后**备份整个数据卷。例如默认卷名：
 
 ```bash
@@ -206,8 +265,10 @@ docker compose start app
 
 ```bash
 docker compose stop app
-`docker volume create pricepatrol-data-restored`
+docker volume create pricepatrol-data-restored
 docker run --rm -v pricepatrol-data-restored:/target -v "$PWD/../pricepatrol-backups:/backup:ro" alpine:3.22 sh -c 'tar -C /target -xzf /backup/data.tar.gz && chown -R 1000:1000 /target'
 ```
 
 在 `.env` 中改 `DATA_VOLUME=pricepatrol-data-restored`，恢复该备份配套的原 `ENCRYPTION_KEY`，确认应用版本兼容，再执行 `docker compose up -d --no-build`。验证管理员登录、店铺与预警数据、账号会话后再处理旧卷；旧卷仍保留，可用于回退。已失效的商家会话需要用户重新登录。
+
+如果恢复的是设置页下载的单文件一致性备份，将其放入新的空卷，命名为 `monitor.sqlite` 并设置 UID/GID 1000；不要带入旧卷的 `monitor.sqlite-wal` 或 `monitor.sqlite-shm`。先使用生成备份时的镜像版本启动验证，再升级到新版本。数据库迁移后的回退应恢复迁移前备份，不直接让旧镜像读取新结构。

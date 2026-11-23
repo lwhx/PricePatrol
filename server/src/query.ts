@@ -1,6 +1,7 @@
 import type {DatabaseSync,SQLInputValue} from 'node:sqlite';
 import type {QueryInput,QueryResult,PriceRow,ProductRow,RuleGroup,Whitelist,AlertTask,CollectionTask,MonitorTask} from '../../shared/contracts.js';
 import type {Store} from './database.js';
+import {HttpError} from './api-context.js';
 import {evaluateRules,moneyCents,formatDiscount,whitelistReason} from './domain.js';
 
 export function registerQueryFunctions(db:DatabaseSync):void{
@@ -32,20 +33,20 @@ function plan(store:Store,input:QueryInput,selectedIds?:string[]):Plan{
  const where:string[]=[],args:SQLInputValue[]=[];
  let groups=input.groups||[];
  if(selectedIds){where.push(`${input.view==='product'?"p.shop_id||':'||p.product_id":'p.id'} IN(SELECT value FROM json_each(?))`);args.push(JSON.stringify(selectedIds));}
- if(input.whitelistMode&&input.whitelistMode!=='all'&&!input.taskId)throw Error('白名单查询需要指定任务');
+ if(input.whitelistMode&&input.whitelistMode!=='all'&&!input.taskId)throw new HttpError(400,'白名单查询需要指定任务');
  if(input.taskId){
   let task:AlertTask|MonitorTask|undefined;
   let source:Pick<CollectionTask,'scope'|'productIds'>;
   if(input.runId){
-   const history=store.getRun(input.runId);if(!history)throw Error('采集批次不存在');
+   const history=store.getRun(input.runId);if(!history)throw new HttpError(400,'采集批次不存在');
    task=history.alertTaskSnapshots?.find(snapshot=>snapshot.id===input.taskId&&snapshot.collectionTaskId===history.taskId&&snapshot.shopId===history.shopId);
    // Existing reports retain their original combined-task snapshot after migration.
    if(!task&&(!history.trigger||history.trigger==='legacy')&&history.taskId===input.taskId&&isLegacyMonitorTask(history.taskSnapshot))task=history.taskSnapshot;
-   if(!task)throw Error('该采集批次没有此预警任务的历史快照');
+   if(!task)throw new HttpError(400,'该采集批次没有此预警任务的历史快照');
    source=history;
   }else{
-   task=store.getAlertTask(input.taskId);if(!task)throw Error('预警任务不存在');
-   const collection=store.getTask(task.collectionTaskId);if(!collection)throw Error('关联采集任务不存在');
+   task=store.getAlertTask(input.taskId);if(!task)throw new HttpError(400,'预警任务不存在');
+   const collection=store.getTask(task.collectionTaskId);if(!collection)throw new HttpError(400,'关联采集任务不存在');
    source=collection;
   }
   groups=input.groups??task.rules;
@@ -75,7 +76,7 @@ function plan(store:Store,input:QueryInput,selectedIds?:string[]):Plan{
  else if(amounts.includes(field))expr=`amount_cents(json_extract(payload,'$.${field}'))`;
  else if(['skuCount','matchedSkuCount','unknownCount'].includes(field))expr=`CAST(json_extract(payload,'$.${field}') AS REAL)`;
  else if(['discount','minDiscount','maxDiscount'].includes(field))expr=product?(field==='maxDiscount'?'discount_max_key':'discount_min_key'):'discount_key';
- else throw Error('不支持的排序字段');
+ else throw new HttpError(400,'不支持的排序字段');
  const order=input.order==='asc'?'ASC':'DESC';
  const sort=`(${expr}) IS NULL ASC,${expr} ${order},shop_id ASC,product_id ASC,sku_id ASC`;
  const integer=(value:number|undefined,fallback:number)=>Number.isSafeInteger(value)&&value!>0?value!:fallback;
