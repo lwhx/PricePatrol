@@ -180,7 +180,7 @@ export class SessionHttp {
             let response: HttpResponse;
             try {
                 response = await this.transport(url, { method: init.method, body: init.body, signal: combined, headers: {
-                        'User-Agent': this.userAgent, 'Accept': init.accept ?? 'application/json', 'Origin': 'https://qn.taobao.com', 'Referer': 'https://qn.taobao.com/',
+                        'User-Agent': this.userAgent, 'Accept': init.accept ?? 'application/json', 'Accept-Language': 'zh-CN,zh;q=0.9', 'Origin': 'https://qn.taobao.com', 'Referer': 'https://qn.taobao.com/',
                         ...(init.body ? { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' } : {}), Cookie: this.jar.getCookieStringSync(url)
                     } });
             }

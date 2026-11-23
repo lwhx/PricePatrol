@@ -87,6 +87,35 @@ it.each(['expired', 'changed principal', 'replaced during request'])('pauses sch
 });
 
 describe('HTTP collector',()=>{
+  it('verifies and collects using a supported first-page size without accepting empty declared pages',async()=>{
+    const f=fixture();
+    const transport:HttpTransport=async(url,init)=>{
+      if(init.body){
+        const q=JSON.parse(JSON.parse(new URLSearchParams(init.body).get('data')!).jsonBody);
+        if(q.pagination.pageSize>20)return {status:200,headers:{},body:JSON.stringify({ret:['SUCCESS::ok'],data:{result:JSON.stringify({success:true,data:{pagination:{...q.pagination,total:3},table:{dataSource:[]}}})}})};
+      }
+      return f.transport(url,init);
+    };
+    const collector=createCollector({transport});
+    expect(await collector.verify(account)).toMatchObject({sellerId:account.sellerId});
+    const products:ProductCollection[]=[];
+    const result=await collector.collect({shopId:'shop',credentials:account,signal:new AbortController().signal,onProduct:p=>{products.push(p);},onProgress:()=>{}});
+    expect(result).toMatchObject({expected:3,processed:3,failedProductIds:[],coverageComplete:true});
+    expect(products.map(p=>p.productId)).toEqual(ids);
+  });
+
+  it.each(['tmall','taobao'] as const)('verifies %s sessions when the management endpoint requires a language preference',async platform=>{
+    const f=fixture();
+    const transport:HttpTransport=async(url,init)=>{
+      if(new URL(url).hostname==='h5api.m.taobao.com'&&!Object.entries(init.headers).some(([key,value])=>key.toLowerCase()==='accept-language'&&value.includes('zh-CN')))
+        return {status:200,headers:{},body:JSON.stringify({ret:['FAIL_SYS_USER_VALIDATE::challenge','RGV587_ERROR::challenge']})};
+      return f.transport(url,init);
+    };
+    const actual=await createCollector({transport}).verify({...account,platform});
+    expect(actual).toMatchObject({sellerId:account.sellerId,shopName:account.shopName,platform});
+    expect(f.requests.filter(r=>r.body).length).toBeGreaterThanOrEqual(2);
+  });
+
   it('exports a Collector implementation',()=>{expect(createCollector()).toHaveProperty('collect');});
   it('verifies permission and actual seller identity, receives and signs with renewed token',async()=>{
     const f=fixture({token:true});

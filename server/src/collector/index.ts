@@ -14,7 +14,7 @@ async function findVerificationProduct(client: Client, signal: AbortSignal): Pro
     let listingBaseline: Page | undefined, skuBaseline: Page | undefined;
     for (let current = 1; current <= MAX_VERIFICATION_PAGES_PER_TAB; current++) {
         if (!listingBaseline || current <= Math.ceil(listingBaseline.total / listingBaseline.pageSize)) {
-            const page = await client.page('on_sale', current, listingBaseline?.pageSize ?? 100, signal);
+            const page = await client.page('on_sale', current, listingBaseline?.pageSize ?? 20, signal);
             pageInvariant(page, listingBaseline, listing);
             listingBaseline ??= page;
             const common = page.products.find(product => sku.has(product.productId));
@@ -22,7 +22,7 @@ async function findVerificationProduct(client: Client, signal: AbortSignal): Pro
                 return common.productId;
         }
         if (!skuBaseline || current <= Math.ceil(skuBaseline.total / skuBaseline.pageSize)) {
-            const page = await client.page('on_sale_skucenter', current, skuBaseline?.pageSize ?? 100, signal);
+            const page = await client.page('on_sale_skucenter', current, skuBaseline?.pageSize ?? 20, signal);
             pageInvariant(page, skuBaseline, sku);
             skuBaseline ??= page;
             const common = page.products.find(product => listing.has(product.productId));
@@ -51,7 +51,7 @@ export function createCollector(configuration: CollectorConfiguration = {}): Col
     async function otherPlatformAccepts(credentials: AccountCredentials, signal: AbortSignal): Promise<Platform | null> {
         const alternative: Platform = credentials.platform === 'tmall' ? 'taobao' : 'tmall';
         try {
-            await new Client({ ...credentials, platform: alternative }, configuration).page('on_sale', 1, 100, signal);
+            await new Client({ ...credentials, platform: alternative }, configuration).page('on_sale', 1, 20, signal);
             return alternative;
         }
         catch (error) {
@@ -95,7 +95,7 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
     const listingSeen = new Set<string>();
     for (let current = 1; !baseline || current <= Math.ceil(baseline.total / baseline.pageSize); current++) {
         checkAbort(signal);
-        const page = await client.page('on_sale', current, baseline?.pageSize ?? 100, signal);
+        const page = await client.page('on_sale', current, baseline?.pageSize ?? 20, signal);
         pageInvariant(page, baseline, listingSeen);
         baseline ??= page;
         for (const p of page.products)
@@ -123,7 +123,7 @@ async function collect(options: CollectOptions, configuration: CollectorConfigur
     if (discovered.size) {
         for (let current = 1; !backendBaseline || current <= Math.ceil(backendBaseline.total / backendBaseline.pageSize); current++) {
             checkAbort(signal);
-            const page = await client.page('on_sale_skucenter', current, backendBaseline?.pageSize ?? 100, signal);
+            const page = await client.page('on_sale_skucenter', current, backendBaseline?.pageSize ?? 20, signal);
             pageInvariant(page, backendBaseline, backendSeen);
             backendBaseline ??= page;
             if (!selected && page.total !== baseline!.total)
