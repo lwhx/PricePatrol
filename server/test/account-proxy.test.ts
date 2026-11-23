@@ -1,4 +1,7 @@
 import {Writable} from 'node:stream';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 import {afterEach,describe,expect,it} from 'vitest';
 import type {AccountCredentials,Collector,Shop,VerifiedAccount} from '../../shared/contracts.js';
 import {accountSchema} from '../src/validation.js';
@@ -22,11 +25,13 @@ async function setup(collector?:Collector){
   const logs:string[]=[];
   const logStream=new Writable({write(chunk,_encoding,done){logs.push(String(chunk));done();}});
   const store=new Store(':memory:','a'.repeat(64));
+  // CI runners have no TMPDIR; create an owned scratch directory instead of relying on ambient env.
+  const dataDir=mkdtempSync(join(tmpdir(),'account-proxy-test-'));
   const result=await buildApp({store,collector:collector??{
     verify:async input=>{seen.push(input);return {...account,userAgent:input.userAgent??account.userAgent,appKey:input.appKey??account.appKey};},
     collect:async()=>({cookies:[{name:'cookie2',value:'fixture-refreshed-cookie'}],expected:0,processed:0,failedProductIds:[],coverageComplete:true}),
-  },dataDir:process.env.TMPDIR!,serveStatic:false,logStream});
-  closes.push(async()=>{await result.app.close();store.close();});
+  },dataDir,serveStatic:false,logStream});
+  closes.push(async()=>{await result.app.close();store.close();rmSync(dataDir,{recursive:true,force:true});});
   const auth=await result.app.inject({method:'POST',url:'/api/auth/setup',payload:{password:'fixture_password_long'}});
   expect(auth.statusCode).toBe(200);
   const headers={cookie:auth.cookies.map(cookie=>`${cookie.name}=${cookie.value}`).join('; ')};
