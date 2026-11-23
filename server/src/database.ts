@@ -115,37 +115,48 @@ export class Store {
   if(this.db.isTransaction)return fn();this.db.exec('BEGIN IMMEDIATE');
   try{const value=fn();this.db.exec('COMMIT');return value;}catch(error){this.db.exec('ROLLBACK');throw error;}
  }
- saveProduct(runId:string,product:ProductCollection):void{
+ saveProduct(runId:string,product:ProductCollection):number{
   const run=this.getRun(runId);if(!run)throw Error('作业不存在');const shop=this.getShop(run.shopId);if(!shop)throw Error('店铺不存在');
+  if(run.finishedAt)throw Error('已结束作业快照不可更改');
   for(const row of product.rows){
    if(row.shopId!==run.shopId||row.productId!==product.productId)throw Error('采集结果店铺或商品归属不匹配');
    for(const field of ['backendPrice','before','after'] as const)if(row[field]!==null&&moneyCents(row[field])===null)throw Error('金额必须为安全整数分');
   }
-  this.transaction(()=>{
+  return this.transaction(()=>{
+   let inserted=0;
    const existing=this.readMany<PriceRow>('SELECT payload FROM latest WHERE shop_id=? AND product_id=?',run.shopId,product.productId);
+   const existingById=new Map(existing.map(row=>[row.id,row]));
    const sources=[...product.rows];
    if(product.error){for(const old of existing)if(!sources.some(r=>rowKey(r)===old.id))sources.push({...old,status:'stale',error:product.error});}
    if(!sources.length&&product.error)sources.push({shopId:run.shopId,productId:product.productId,skuId:'',title:product.title,specs:'',seatSpec:'',color:'',backendPrice:null,before:null,after:null,backendVerified:false,status:'error',error:product.error,sourceUrl:'',backendSource:'',detailFetchedAt:null,backendFetchedAt:null,stock:null});
    // A resumed batch can replace its own failed placeholder, but never completed evidence.
    if(!run.finishedAt&&!product.error&&sources.length&&sources.every(row=>row.status==='ok')){
-    this.db.prepare("DELETE FROM prices WHERE run_id=? AND shop_id=? AND product_id=? AND sku_id='' AND json_extract(payload,'$.status')!='ok'").run(runId,run.shopId,product.productId);
+    inserted-=Number(this.db.prepare("DELETE FROM prices WHERE run_id=? AND shop_id=? AND product_id=? AND sku_id='' AND json_extract(payload,'$.status')!='ok'").run(runId,run.shopId,product.productId).changes);
     this.db.prepare("DELETE FROM latest WHERE shop_id=? AND product_id=? AND sku_id='' AND json_extract(payload,'$.status')!='ok'").run(run.shopId,product.productId);
    }
    for(let source of sources){
     const id=rowKey(source),priorRow=this.readOne<PriceRow>('SELECT payload FROM prices WHERE run_id=? AND id=?',runId,id);
     if(priorRow&&(run.finishedAt||priorRow.status==='ok'&&!priorRow.stale||source.status!=='ok'||!!product.error))continue;
     if(run.finishedAt)throw Error('已结束作业快照不可更改');
-    const old=existing.find(r=>r.id===id);
+    const old=existingById.get(id);
     const stale=source.status==='stale'||!!old&&((source.after===null&&old.after!==null)||(source.backendPrice===null&&old.backendPrice!==null));
     if(stale&&old)source={...source,backendPrice:source.backendPrice??old.backendPrice,before:source.before??old.before,after:source.after??old.after,detailFetchedAt:source.detailFetchedAt??old.detailFetchedAt,backendFetchedAt:source.backendFetchedAt??old.backendFetchedAt,status:'stale',error:source.error||product.error};
     const backendPrice=moneyText(moneyCents(source.backendPrice)),before=moneyText(moneyCents(source.before)),after=moneyText(moneyCents(source.after));
     const base=moneyCents(backendPrice),current=moneyCents(after),prior=moneyCents(before);
     const row:PriceRow={...source,backendPrice,before,after,id,runId,shopName:shop.name,discount:source.backendVerified&&!stale?formatDiscount(backendPrice,after):null,saving:source.backendVerified&&base!==null&&current!==null?moneyText(base-current):null,priceDifference:source.backendVerified&&base!==null&&prior!==null?moneyText(prior-base):null,updatedAt:new Date().toISOString(),tags:[],note:'',stale};
     const payload=JSON.stringify(row);this.db.prepare('INSERT INTO prices VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,id) DO UPDATE SET payload=excluded.payload').run(runId,id,run.shopId,row.productId,row.skuId,payload);
+    if(!priorRow)inserted++;
     this.db.prepare('INSERT INTO latest VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,payload=excluded.payload').run(id,run.shopId,row.productId,row.skuId,runId,payload);
    }
+   // Absence is meaningful only when the collector explicitly verified the whole
+   // SKU set. Failed/partial responses must never remove known current prices.
+   if(product.skuSetComplete===true&&!product.error&&product.rows.every(row=>row.status==='ok')){
+    this.db.prepare('DELETE FROM latest WHERE shop_id=? AND product_id=? AND id NOT IN(SELECT value FROM json_each(?))').run(run.shopId,product.productId,JSON.stringify(product.rows.map(rowKey)));
+   }
+   return inserted;
   });
  }
+ countRunPrices(runId:string):number{return Number(this.db.prepare('SELECT count(*) n FROM prices WHERE run_id=?').get(runId)?.n||0);}
  getRunPrices(runId:string):PriceRow[]{return this.readMany<PriceRow>('SELECT payload FROM prices WHERE run_id=? ORDER BY shop_id,product_id,sku_id',runId);}
  history(shopId:string,productId:string,skuId?:string):PriceRow[]{return this.readMany<PriceRow>(`SELECT p.payload FROM prices p JOIN runs r ON r.id=p.run_id WHERE p.shop_id=? AND p.product_id=? ${skuId===undefined?'':'AND p.sku_id=?'} ORDER BY r.created_at DESC,p.run_id DESC,p.sku_id LIMIT 1000`,...([shopId,productId,...(skuId===undefined?[]:[skuId])]));}
  saveAlert(alert:Alert):void{

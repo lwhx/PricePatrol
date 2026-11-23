@@ -32,7 +32,8 @@ export interface Run {id:string;taskId:string|null;shopId:string;taskName:string
 export interface AlertRun {id:string;alertTaskId:string;collectionRunId:string;shopId:string;shopName:string;taskName:string;status:'queued'|'running'|'success'|'partial'|'failed';rows:number;checked:number;excluded:number;matched:number;unknown:number;message:string;ruleVersion:number;createdAt:string;startedAt:string|null;finishedAt:string|null;notificationStatus:string}
 export interface Alert {id:string;runId:string;taskId:string|null;alertRunId?:string|null;ruleVersion?:number;shopId:string;shopName:string;productId:string;skuId:string;title:string;specs:string;backendPrice:string|null;before:string|null;after:string|null;discount:string|null;reasons:string[];state:'pending'|'confirmed'|'resolved';note:string;createdAt:string}
 export interface CollectorProgress {phase:string;expected:number;processed:number;failed:number;message:string}
-export interface ProductCollection {productId:string;title:string;rows:CollectedRow[];error?:string}
+/** Only a fully verified SKU listing may retire absent rows from the current-price view. */
+export interface ProductCollection {productId:string;title:string;rows:CollectedRow[];error?:string;skuSetComplete?:boolean}
 export interface CollectOptions {shopId:string;credentials:VerifiedAccount;productIds?:string[];skipProductIds?:string[];signal:AbortSignal;onProgress:(progress:CollectorProgress)=>void|Promise<void>;onProduct:(product:ProductCollection)=>void|Promise<void>}
 export interface CollectionResult {cookies:CookieRecord[];expected:number;processed:number;failedProductIds:string[];coverageComplete:boolean}
 export interface Collector {verify:(credentials:AccountCredentials,signal?:AbortSignal)=>Promise<VerifiedAccount>;collect:(options:CollectOptions)=>Promise<CollectionResult>}

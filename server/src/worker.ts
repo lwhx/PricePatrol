@@ -120,6 +120,7 @@ export class Worker {
     const controller = new AbortController(); this.active = controller; this.activeId = run.id;
     run.status = 'running'; run.startedAt ??= now(); run.message = '正在读取商品'; this.store.saveRun(run);
     const priorRows = this.store.getRunPrices(run.id), productStates = new Map<string, boolean>();
+    run.rows = priorRows.length;
     for (const row of priorRows) productStates.set(row.productId, (productStates.get(row.productId) ?? true) && row.status === 'ok' && !row.stale);
     const completed = new Set([...productStates].filter(([,ok]) => ok).map(([id]) => id));
     const failures = new Set([...productStates].filter(([,ok]) => !ok).map(([id]) => id));
@@ -136,10 +137,10 @@ export class Worker {
         onProduct: product => {
           if (controller.signal.aborted || completed.has(product.productId)) return;
           if (run.scope === 'selected' && !run.productIds.includes(product.productId)) throw Error('采集结果超出指定商品范围');
-          this.assertProduct(run, product.rows); this.store.saveProduct(run.id, product); attempted.add(product.productId);
+          this.assertProduct(run, product.rows); run.rows += this.store.saveProduct(run.id, product); attempted.add(product.productId);
           if (product.error || !product.rows.length || product.rows.some(row => row.status !== 'ok')) failures.add(product.productId);
           else {failures.delete(product.productId); completed.add(product.productId);}
-          run.processed = attempted.size; run.failed = failures.size; run.rows = this.store.getRunPrices(run.id).length; this.store.saveRun(run);
+          run.processed = attempted.size; run.failed = failures.size; this.store.saveRun(run);
         },
       });
       if (controller.signal.aborted) {run.status = 'stopped'; run.message = '已停止，可继续'; return;}
@@ -150,7 +151,7 @@ export class Worker {
       result.failedProductIds.forEach(id => {if (!completed.has(id)) failures.add(id);});
       if (run.scope === 'selected') run.productIds.filter(id => !completed.has(id)).forEach(id => failures.add(id));
       run.failedProductIds = [...failures]; run.failed = failures.size; run.processed = attempted.size;
-      run.expected = Math.max(run.expected, result.expected); run.rows = this.store.getRunPrices(run.id).length;
+      run.expected = Math.max(run.expected, result.expected); run.rows = this.store.countRunPrices(run.id);
       run.status = run.failed || !result.coverageComplete || run.processed < run.expected ? 'partial' : 'success';
       run.message = run.status === 'success' ? '采集完成' : '部分完成，请查看失败与覆盖范围'; run.finishedAt = now();
     } catch (error) {
@@ -167,7 +168,7 @@ export class Worker {
       }
     } finally {
       run.failedProductIds = [...failures]; run.failed = failures.size; run.processed = attempted.size;
-      run.rows = this.store.getRunPrices(run.id).length;
+      run.rows = this.store.countRunPrices(run.id);
       this.store.saveRun(run); this.active = null; this.activeId = null;
     }
     if (run.trigger === 'scheduled' && run.finishedAt && ['success', 'partial'].includes(run.status) && this.onCompleted) {

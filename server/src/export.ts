@@ -18,7 +18,13 @@ export function buildExport(store:Store,input:ExportInput):ExportResult{
    const products=new Map(rows.map((row,index)=>[productKey(row),{row,index}]));
    const query={...input.query,view:'sku' as const,shopIds:[...new Set(rows.map(row=>row.shopId))],productIds:[...new Set(rows.map(row=>row.productId))],sort:'skuId',order:'asc' as const};
    if(input.allSkus){query.groups=[];query.skuIds=undefined;query.search=undefined;query.from=undefined;query.to=undefined;}
-   rows=store.queryAll(query).filter(row=>products.has(productKey(row))).sort((a,b)=>products.get(productKey(a))!.index-products.get(productKey(b))!.index).map(row=>({...products.get(productKey(row))!.row,...row}));
+   rows=store.queryAll(query).filter(row=>products.has(productKey(row))).sort((a,b)=>products.get(productKey(a))!.index-products.get(productKey(b))!.index).map(row=>{
+    const product=products.get(productKey(row))!.row;
+    // Status, identity, title and update time describe the product in product
+    // view. Only explicitly SKU-level fields plus annotations come from a SKU.
+    const detail=Object.fromEntries([...skuFields,'note','tags'].map(field=>[field,(row as unknown as Record<string,unknown>)[field]]));
+    return {...product,...detail};
+   });
   }
   sourceCount=rows.length;
   if(!granular){const seen=new Set<string>();rows=rows.filter(row=>{const key=productKey(row);if(seen.has(key))return false;seen.add(key);return true;});}
