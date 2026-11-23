@@ -33,6 +33,9 @@ export class Store {
    CREATE TABLE IF NOT EXISTS queries(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
   `);
   migrateCollectionAlerts(this.db);
+  // The collection/alert migration rebuilds alerts. Install retention indexes on the final schema.
+  this.db.exec(`CREATE INDEX IF NOT EXISTS latest_run ON latest(run_id);
+   CREATE INDEX IF NOT EXISTS alerts_run ON alerts(run_id);`);
   initializeIncidents(this.db);
   this.db.exec('CREATE TABLE IF NOT EXISTS metadata(revision INTEGER NOT NULL); INSERT INTO metadata SELECT 0 WHERE NOT EXISTS(SELECT 1 FROM metadata)');
   for(const table of ['latest','prices','annotations','tasks','alert_tasks'])for(const action of ['INSERT','UPDATE','DELETE'])this.db.exec(`CREATE TRIGGER IF NOT EXISTS revision_${table}_${action} AFTER ${action} ON ${table} BEGIN UPDATE metadata SET revision=revision+1; END`);

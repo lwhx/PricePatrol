@@ -8,7 +8,11 @@ import ErrorBanner from './ErrorBanner.vue';
 defineProps<{ runs: AlertRun[]; loading?: boolean }>();
 const emit = defineEmits<{ refresh: [] }>();
 const { busy, error, act } = useFeedback();
-function canNotify(run: AlertRun) { return ['success', 'partial'].includes(run.status) && !['disabled', 'skipped', 'sending', 'accepted', 'sent'].includes(run.notificationStatus); }
+function canNotify(run: AlertRun) {
+  if (!['success', 'partial'].includes(run.status) || run.notificationCount === 0) return false;
+  if (run.notificationStatus === 'disabled') return (run.notificationCount ?? 0) > 0;
+  return !['skipped', 'sending', 'accepted', 'sent'].includes(run.notificationStatus);
+}
 async function notify(run: AlertRun) {
   await act(async () => { await post(`/alert-runs/${run.id}/notify`); emit('refresh'); }, '汇总通知重试已提交；不会重新采集或评估规则');
 }

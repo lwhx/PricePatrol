@@ -4,7 +4,7 @@ import {z} from 'zod';
 import type {AccountCredentials,VerifiedAccount,Shop} from '../../shared/contracts.js';
 import {accountSchema,cookieSchema,appKeySchema} from './validation.js';
 import {HttpError,publicRun,requireValue,type ApiContext} from './api-context.js';
-import {CollectorError} from './collector/errors.js';
+import {CollectorError,isInvalidCredentialCode} from './collector/errors.js';
 import {submitCollection} from './collection-submissions.js';
 
 const verificationMessages:Partial<Record<string,string>>={
@@ -20,7 +20,6 @@ const verificationMessages:Partial<Record<string,string>>={
   NETWORK_ERROR:'店铺核验连接失败：请检查服务器网络或稍后重试',
   HTTP_ERROR:'平台接口暂时无法完成核验：请稍后重试',
 };
-const invalidSessionCodes=new Set(['AUTH_REQUIRED','COOKIE_INVALID','IDENTITY_CHANGED']);
 class VerificationError extends HttpError{
   constructor(readonly code:string,message:string,statusCode=400){super(statusCode,message);}
 }
@@ -38,7 +37,7 @@ export function registerAccounts(ctx:ApiContext):void{
     catch(error){
       const code=error instanceof Error&&'code' in error?error.code:undefined;
       const message=typeof code==='string'&&Object.hasOwn(verificationMessages,code)?verificationMessages[code]:undefined;
-      if(typeof code!=='string'||(!message&&!(error instanceof CollectorError)))throw error;
+      if(typeof code!=='string'||(!message&&!isInvalidCredentialCode(code)&&!(error instanceof CollectorError)))throw error;
       throw new VerificationError(code,message??'店铺验证失败，请确认 Cookie 完整、平台正确且有商品读取权限');
     }
   }
@@ -95,7 +94,7 @@ export function registerAccounts(ctx:ApiContext):void{
         store.transaction(()=>{
           const current=store.getShop(id);
           if(!current||store.getCredentialVersion(id)!==version)return;
-          const sessionStatus=invalidSessionCodes.has(error.code)?'auth_required':current.sessionStatus;
+          const sessionStatus=isInvalidCredentialCode(error.code)?'auth_required':current.sessionStatus;
           store.saveShop({...current,sessionStatus,lastError:error.message,updatedAt:new Date().toISOString()});
         });
       }

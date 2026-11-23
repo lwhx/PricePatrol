@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Store } from '../src/database.js';
 import { MaintenanceService } from '../src/maintenance.js';
-import { backupName, copyBackup } from '../src/backup.js';
+import { backupName, copyBackup, ownedBackups, withBackupDirectory } from '../src/backup.js';
 
 const key = 'maintenance-unittest-key-kept-separately';
 const teardown: Array<() => Promise<void>> = [];
@@ -83,22 +83,26 @@ it('validates the copy before publication and rotates only completed files owned
   const { service, store } = setup(dir, { backupCopyDir: remote });
   service.updateSettings({ backupKeep: 1 });
   await service.run('backup');
-  const [first] = await readdir(local);
   const owner = store.getConfig('maintenance.owner', '');
+  const [first] = await ownedBackups(local, owner);
   const unrelated = backupName(randomUUID(), new Date());
   const partial = '.' + first + '.partial';
   const linked = backupName(owner, new Date());
+  const linkedStage = '.' + linked + '.' + randomUUID() + '.partial';
+  const otherStage = '.' + unrelated + '.' + randomUUID() + '.partial';
   for (const destination of [local, remote]) {
     await writeFile(join(destination, unrelated), 'another database');
     await writeFile(join(destination, partial), 'an incomplete file');
+    await writeFile(join(destination, otherStage), 'other staging');
     await symlink(join(destination, unrelated), join(destination, linked));
+    await symlink(join(destination, unrelated), join(destination, linkedStage));
   }
   await service.run('backup');
   const files = await readdir(local);
   expect(files).toEqual(await readdir(remote));
   expect(files).not.toContain(first);
-  expect(files).toEqual(expect.arrayContaining([unrelated, partial, linked]));
-  const completed = files.filter(file => ![unrelated, partial, linked].includes(file));
+  expect(files).toEqual(expect.arrayContaining([unrelated, partial, linked, linkedStage, otherStage]));
+  const completed = await ownedBackups(local, owner);
   expect(completed).toHaveLength(1);
   for (const destination of [local, remote]) {
     const current = join(destination, completed[0]);
@@ -158,38 +162,82 @@ it.each(['local', 'copy'])('persists a %s failure, skips deletion and defers ano
   expect((await reopened.service.status()).lastError).toBeNull();
 });
 
-it('recognizes an interrupted backup after process exit and safely retries without publishing the abandoned partial', async () => {
+it.each(['backups', 'copy'])('reclaims the interrupted %s staging file after process exit before retrying cleanup', async stage => {
   const dir = await temporary();
-  const local = join(dir, 'backups');
-  await mkdir(local);
-  const fixture = setup(dir);
+  const local = join(dir, 'backups'), remote = join(dir, 'copy');
+  await mkdir(remote);
+  const options = { backupCopyDir:remote };
+  const fixture = setup(dir, options);
   seedHistory(fixture.store);
-  fixture.service.updateSettings({ cleanupEnabled: true, backupsEnabled: false });
+  fixture.store.db.exec('CREATE TABLE fixture_blob(data BLOB); INSERT INTO fixture_blob VALUES(zeroblob(2097152))');
+  fixture.service.updateSettings({ cleanupEnabled:true, backupsEnabled:false, backupKeep:1 });
   await fixture.close();
+  // Interrupt after real snapshot/copy validation and fsync, just before the atomic publication link.
   const script = `
-    import { watch } from 'node:fs';
-    import { join } from 'node:path';
-    import { Store } from './server/src/database.ts';
-    import { MaintenanceService } from './server/src/maintenance.ts';
-    const dataDir=process.argv[1];
-    const store=new Store(join(dataDir,'monitor.sqlite'),process.argv[2]);
-    const service=new MaintenanceService(store,{dataDir,backupCopyDir:''});
-    watch(join(dataDir,'backups'),(_,file)=>{ if(file?.endsWith('.partial')) process.exit(42); });
-    await service.tick();
+    import fs from 'node:fs/promises';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { dirname, join } from 'node:path';
+    const [dataDir,key,stage]=process.argv.slice(1);
+    const link=fs.link;
+    fs.link=(from,to)=>{ if(dirname(to)===join(dataDir,stage)) process.exit(42); return link(from,to); };
+    syncBuiltinESMExports();
+    const {Store}=await import('./server/src/database.ts');
+    const {MaintenanceService}=await import('./server/src/maintenance.ts');
+    const store=new Store(join(dataDir,'monitor.sqlite'),key);
+    await new MaintenanceService(store,{dataDir,backupCopyDir:join(dataDir,'copy')}).tick();
     process.exit(1);
   `;
-  await expect(promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script, dir, key], { timeout: 10_000 }))
-    .rejects.toMatchObject({ code: 42 });
-  const { store, service } = setup(dir);
-  expect((await readdir(local)).every(name => name.endsWith('.partial'))).toBe(true);
+  await expect(promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script, dir, key, stage], { timeout:10_000 }))
+    .rejects.toMatchObject({ code:42 });
+  const { store, service } = setup(dir, options);
+  const abandoned = (await readdir(join(dir,stage))).filter(name => name.endsWith('.partial'));
+  expect(abandoned).toHaveLength(1);
+  const partial = join(dir,stage,abandoned[0]!);
+  expect((await stat(partial)).size).toBeGreaterThan(2 * 1024 * 1024);
   const interrupted = await service.status();
-  expect(interrupted).toMatchObject({ running: false, backupCount: 0, lastCleanupAt: null });
-  expect(interrupted.backupError).toContain('中断');
+  expect(interrupted).toMatchObject({ running:false, backupCount:stage === 'copy' ? 1 : 0, lastCleanupAt:null });
+  expect(interrupted[stage === 'copy' ? 'copyError' : 'backupError']).toContain('中断');
   await service.tick();
   expect((await service.status()).lastRunAt).toBe(interrupted.lastRunAt);
   expect(store.getRun('old')).toBeDefined();
   await service.run('all');
-  expect(await service.status()).toMatchObject({ backupCount: 1, lastError: null, lastDeleted: 1 });
+  expect(await service.status()).toMatchObject({ backupCount:1, lastError:null, lastDeleted:1 });
+  await expect(stat(partial)).rejects.toMatchObject({ code:'ENOENT' });
+  const owner = store.getConfig('maintenance.owner', '');
+  for (const destination of [local, remote]) {
+    expect((await readdir(destination)).filter(name => name.endsWith('.partial'))).toEqual([]);
+    expect(await ownedBackups(destination, owner)).toHaveLength(1);
+  }
+});
+
+it.each(['backups', 'copy'])('protects active %s staging from a second maintenance process', async stage => {
+  const dir = await temporary();
+  const destination = join(dir, stage), remote = join(dir, 'copy');
+  await mkdir(remote);
+  const { store, service } = setup(dir, { backupCopyDir:remote });
+  seedHistory(store);
+  const owner = store.getConfig('maintenance.owner', '');
+  const active = join(destination, '.' + backupName(owner, new Date()) + '.' + randomUUID() + '.partial');
+  await withBackupDirectory(destination, owner, true, async () => {
+    await writeFile(active, 'active writer');
+    const script = `
+      import {join} from 'node:path';
+      import {Store} from './server/src/database.ts';
+      import {MaintenanceService} from './server/src/maintenance.ts';
+      const [dataDir,key]=process.argv.slice(1);
+      const store=new Store(join(dataDir,'monitor.sqlite'),key);
+      const service=new MaintenanceService(store,{dataDir,backupCopyDir:join(dataDir,'copy')});
+      try { await service.cleanupBefore(); }
+      catch(error) { console.log(error.cause.errcode); }
+      finally { await service.close(); store.close(); }
+    `;
+    const child = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script, dir, key], { timeout:10_000 });
+    expect(child.stdout.trim()).toBe('5'); // SQLITE_BUSY from the destination lock
+    expect(await readFile(active,'utf8')).toBe('active writer');
+    expect(store.getRun('old')).toBeDefined();
+  });
+  await expect(service.cleanupBefore()).resolves.toMatchObject({deleted:1});
+  await expect(stat(active)).rejects.toMatchObject({code:'ENOENT'});
 });
 
 it('serializes overlapping manual and automatic work and waits for the accepted backup on close', async () => {

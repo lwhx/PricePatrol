@@ -7,6 +7,7 @@ import {Store,type RunRecord} from '../src/database.js';
 import {AlertWorker} from '../src/alert-worker.js';
 import {getIncident,updateIncident} from '../src/incidents.js';
 import {migrateCollectionAlerts} from '../src/migrations.js';
+import {previewRetention,cleanupRetention} from '../src/retention.js';
 import {Vault} from '../src/security.js';
 import type {Alert,AlertTask,MonitorTask,PriceRow,Shop,VerifiedAccount} from '../../shared/contracts.js';
 
@@ -138,4 +139,28 @@ describe('collection and alert migration on existing SQLite files',()=>{
   db.exec('DROP TRIGGER fail_migration');db.close();connections.splice(connections.indexOf(db),1);
   const store=open(filename);expect(store.getAlertTask(task.id)?.rules).toEqual(task.rules);expect(store.getRunPrices(legacyRun.id)).toEqual([price]);
  });
+});
+
+it('uses run-id indexes and computes unfinished retry parents once on the upgraded retention path', () => {
+ const store=open(legacyFile());
+ const parent=store.getRun('deleted-task-run')!;
+ store.saveRun({...parent,id:'retry',parentRunId:parent.id,status:'stopped',finishedAt:null});
+ const policy={historyBefore:'2027-01-01T00:00:00Z',alertBefore:'2027-01-01T00:00:00Z'};
+ const prepared=vi.spyOn(store.db,'prepare');
+ expect(previewRetention(store,policy)).toMatchObject({runs:0,protectedRuns:2});
+ const selection=prepared.mock.calls.find(([sql])=>sql.startsWith('INSERT INTO retention_candidates'))![0];
+ prepared.mockRestore();
+ const plan=store.db.prepare('EXPLAIN QUERY PLAN '+selection).all();
+ expect(plan.map(row=>row.detail)).toEqual(expect.arrayContaining([
+   expect.stringMatching(/SEARCH l USING (?:COVERING )?INDEX latest_run \(run_id=/),
+   expect.stringMatching(/SEARCH a USING (?:COVERING )?INDEX alerts_run \(run_id=/),
+ ]));
+ const retryScan=plan.find(row=>row.detail==='SCAN child');
+ expect(plan.find(row=>row.id===retryScan?.parent)?.detail).toMatch(/^LIST SUBQUERY/);
+ store.saveRun({...store.getRun('retry')!,status:'success',finishedAt:'2028-01-01T00:00:00Z'});
+ const preview=previewRetention(store,policy);
+ expect(preview).toMatchObject({runs:1,protectedRuns:1});
+ expect(cleanupRetention(store,policy)).toEqual({...preview,deleted:preview.total});
+ expect(store.getRun('old-run')).toBeDefined();
+ expect(store.getRun(parent.id)).toBeUndefined();
 });

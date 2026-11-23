@@ -121,6 +121,23 @@ describe('采集与预警分离交互', () => {
     await button(wrapper, '重发汇总').trigger('click'); await flushPromises();
     expect(postMock).toHaveBeenCalledExactlyOnceWith(`/alert-runs/${alertRun.id}/notify`);
   });
+  it('对全局停用时冻结的候选重发原预警执行，隐藏无候选或已提交的操作', async () => {
+    const runs = [
+      { ...alertRun, id:'global-disabled', notificationStatus:'disabled', notificationCount:1 },
+      { ...alertRun, id:'task-disabled', notificationStatus:'disabled', notificationCount:0 },
+      { ...alertRun, id:'legacy-disabled', notificationStatus:'disabled', notificationCount:undefined },
+      { ...alertRun, id:'empty', notificationStatus:'not_configured', notificationCount:0 },
+      { ...alertRun, id:'submitted', notificationStatus:'accepted' },
+      { ...alertRun, id:'in-flight', notificationStatus:'sending' },
+    ];
+    getMock.mockImplementation(async (path: string) => path === '/shops' ? { shops:[shop] } : path.startsWith('/alert-runs') ? { runs } : { tasks:[] });
+    const { wrapper } = await openRoute('/alert-tasks?tab=runs');
+    const actions = wrapper.findAll('button').filter(item => item.text() === '重发汇总');
+    expect(actions).toHaveLength(1);
+    await actions[0]!.trigger('click');
+    await flushPromises();
+    expect(postMock).toHaveBeenCalledExactlyOnceWith('/alert-runs/global-disabled/notify');
+  });
   it('预警记录支持独立预警执行来源，并保留旧批次过滤', async () => {
     getMock.mockImplementation(async (path: string) => path.startsWith('/alerts') ? { alerts: [] } : path === '/shops' ? { shops: [shop] } : path.startsWith('/alert-runs') ? { runs: [alertRun] } : { runs: [collectionRun] });
     const { router } = await openRoute(`/alerts?alertRunId=${alertRun.id}`);

@@ -83,9 +83,11 @@ it('returns typed verification errors and only invalidates saved credentials on 
       expect(response.body).not.toContain('fixture-secret');
       expect(store.getShop(shop.id)).toMatchObject({sessionStatus:'valid',lastVerifiedAt:shop.lastVerifiedAt});
     }
-    errorCode='AUTH_REQUIRED';
-    expect((await request()).json()).toMatchObject({code:'AUTH_REQUIRED'});
-    expect(store.getShop(shop.id)).toMatchObject({sessionStatus:'auth_required',lastVerifiedAt:shop.lastVerifiedAt});
+    for (errorCode of ['AUTH_REQUIRED','COOKIE_INVALID','IDENTITY_CHANGED','SESSION_EXPIRED']) {
+      store.saveShop({...store.getShop(shop.id)!,sessionStatus:'valid'});
+      expect((await request()).json()).toMatchObject({code:errorCode});
+      expect(store.getShop(shop.id)).toMatchObject({sessionStatus:'auth_required',lastVerifiedAt:shop.lastVerifiedAt});
+    }
   }finally{await app.close();store.close();}
 });
 

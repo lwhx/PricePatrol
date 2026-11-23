@@ -1,3 +1,13 @@
+const invalidCredentialCodes = new Set([
+    'AUTH', 'LOGIN', 'SESSION', 'PERMISSION',
+    'AUTH_REQUIRED', 'COOKIE_INVALID', 'IDENTITY_CHANGED', 'BACKEND_AUTH_REQUIRED',
+    'LOGIN_REQUIRED', 'SESSION_EXPIRED', 'FAIL_SYS_SESSION_EXPIRED', 'NO_PERMISSION', 'PERMISSION_DENIED',
+]);
+
+export function isInvalidCredentialCode(code: unknown): boolean {
+    return typeof code === 'string' && invalidCredentialCodes.has(code);
+}
+
 export class CollectorError extends Error {
     constructor(public readonly code: string, message: string) { super(message); this.name = 'CollectorError'; }
 }

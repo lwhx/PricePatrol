@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import type { MaintenanceSettings, MaintenanceStatus } from '../../shared/operations.js';
 import { HttpError } from './api-context.js';
-import { backupName, copyBackup, ownedBackups, rotateBackups } from './backup.js';
+import { backupName, copyBackup, ownedBackups, rotateBackups, withBackupDirectory } from './backup.js';
 import type { Store } from './database.js';
 import { cleanupRetention, previewRetention, type RetentionPolicy } from './retention.js';
 
@@ -154,17 +154,22 @@ export class MaintenanceService {
     const local = join(this.directory, file);
     let operation = '本地备份';
     try {
-      await this.store.backup(local);
-      this.save({ lastBackupAt: new Date().toISOString(), backupError: null });
-      operation = '轮换本地备份';
-      await rotateBackups(this.directory, this.owner, settings.backupKeep, file);
-      if (this.copyDirectory) {
-        operation = '异地备份';
-        this.save({ active: 'copy' });
-        await copyBackup(local, join(this.copyDirectory, file));
-        operation = '轮换异地备份';
-        await rotateBackups(this.copyDirectory, this.owner, settings.backupKeep, file);
-      }
+      await withBackupDirectory(this.directory, this.owner, true, async () => {
+        await this.store.backup(local);
+        this.save({ lastBackupAt: new Date().toISOString(), backupError: null });
+        operation = '轮换本地备份';
+        await rotateBackups(this.directory, this.owner, settings.backupKeep, file);
+        const destination = this.copyDirectory;
+        if (destination) {
+          operation = '异地备份';
+          this.save({ active: 'copy' });
+          await withBackupDirectory(destination, this.owner, false, async () => {
+            await copyBackup(local, join(destination, file));
+            operation = '轮换异地备份';
+            await rotateBackups(destination, this.owner, settings.backupKeep, file);
+          });
+        }
+      });
       if (cleanup && automaticCleanup) {
         // A setting can change while the background snapshot is being written.
         if (!this.getSettings().cleanupEnabled) cleanup = undefined;

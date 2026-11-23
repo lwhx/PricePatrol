@@ -2,6 +2,7 @@ import {afterEach, expect, it, vi} from 'vitest';
 import {Store, type AlertRunRecord, type RunRecord} from '../src/database.js';
 import {Worker} from '../src/worker.js';
 import {AlertWorker} from '../src/alert-worker.js';
+import {listIncidents} from '../src/incidents.js';
 import type {AlertTask, Collector, CollectedRow, VerifiedAccount} from '../../shared/contracts.js';
 
 const at = '2026-11-23T00:00:00.000Z';
@@ -191,4 +192,41 @@ it('recovers pending notification after committed evaluation but never automatic
   store.saveAlertRun({...store.getAlertRun(evaluation.id)!,notificationStatus:'sending'});
   recovered.recover();await recovered.whenIdle();
   expect(store.getAlertRun(evaluation.id)?.notificationStatus).toBe('failed');expect(notify).toHaveBeenCalledTimes(1);
+});
+
+it.each(['missing', 'covered'])('checks resumed membership before recovering a %s product from a saved row', async membership => {
+  const productId = '1000001';
+  const saved = deferred();
+  let attempt = 0;
+  const { store, worker, idle, alert } = setup(async options => {
+    attempt++;
+    if (attempt === 3) {
+      expect(options.skipProductIds).toEqual([productId]);
+      const missing = membership === 'missing' ? productId : '1000002';
+      return { ...result, processed:0, failedProductIds:[missing], coverageComplete:false };
+    }
+    const row = price(productId, { after:attempt === 1 ? '70' : '95' });
+    await options.onProduct({ productId, title:row.title, rows:[row], skuSetComplete:true });
+    if (attempt === 2) {
+      saved.resolve();
+      await new Promise<void>(resolve => options.signal.addEventListener('abort', () => resolve(), { once:true }));
+    }
+    return result;
+  });
+  store.saveAlertTask({ ...alert, notify:true, notificationPolicy:{ cooldownHours:24, notifyRecovery:true } });
+  const first = worker.enqueue('s', 'c', undefined, true);
+  await idle();
+  expect(store.getAlertRun(first.id + ':a')).toMatchObject({ lifecycle:{ first:1 }, notificationCount:1 });
+  const run = worker.enqueue('s', 'c', undefined, true);
+  await saved.promise;
+  worker.stop(run.id);
+  await idle();
+  const evidence = store.getRunPrices(run.id);
+  worker.resume(run.id);
+  await idle();
+  expect(store.getRunPrices(run.id)).toEqual(evidence);
+  const recovered = membership === 'covered';
+  expect(store.getRun(run.id)).toMatchObject({ status:'partial', failed:1, failedProductIds:[recovered ? '1000002' : productId] });
+  expect(store.getAlertRun(run.id + ':a')).toMatchObject({ lifecycle:{ recovered:Number(recovered) }, notificationCount:Number(recovered) });
+  expect(listIncidents(store, { status:'all', page:1, pageSize:5 }).incidents[0]?.status).toBe(recovered ? 'recovered' : 'active');
 });

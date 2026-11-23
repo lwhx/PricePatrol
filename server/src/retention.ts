@@ -4,8 +4,9 @@ import type {RetentionPolicy,CleanupPreview} from '../../shared/operations.js';
 export type {RetentionPolicy,CleanupPreview} from '../../shared/operations.js';
 
 // Parent identity is required whenever an unfinished retry saves progress or resumes.
-export const unfinishedRetryParentGuard = (alias:string) => `AND NOT EXISTS(
- SELECT 1 FROM runs child WHERE json_extract(child.payload,'$.parentRunId')=${alias}.id
+export const unfinishedRetryParentGuard = (alias:string) => `AND ${alias}.id NOT IN (
+ SELECT json_extract(child.payload,'$.parentRunId') FROM runs child
+ WHERE json_extract(child.payload,'$.parentRunId') IS NOT NULL
  AND (json_extract(child.payload,'$.finishedAt') IS NULL
  OR json_extract(child.payload,'$.status') NOT IN('success','partial','failed'))
 )`;

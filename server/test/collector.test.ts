@@ -4,6 +4,10 @@ import {afterEach, describe, expect, it} from 'vitest';
 import type {CookieRecord, ProductCollection, VerifiedAccount} from '../../shared/contracts.js';
 import {createCollector, defaultHttpTransport, type HttpTransport} from '../src/collector/index.js';
 
+import {Store} from '../src/database.js';
+import {Scheduler} from '../src/scheduler.js';
+import {Worker} from '../src/worker.js';
+
 // These fixtures describe protocol examples, never captured/live marketplace data.
 const tokenName = ['_m_h5_', 'tk'].join('');
 const ids = ['100001', '100002', '100003'];
@@ -38,6 +42,49 @@ async function run(f=fixture(), productIds?:string[], extra:Record<string,unknow
   const result=await createCollector({transport:f.transport}).collect({shopId:'shop',credentials:account,productIds,signal:new AbortController().signal,onProduct:p=>{products.push(p);},onProgress:p=>{progress.push(p);},...extra});
   return {result,products,progress,requests:f.requests};
 }
+
+it.each(['expired', 'changed principal', 'replaced during request'])('pauses scheduled collection on %s credentials and resumes its original run', async scenario => {
+  const store = new Store(':memory:', 'scheduled-credential-regression-key');
+  const at = '2026-11-01T00:00:00.000Z';
+  const shop = {id:'shop', sellerId:account.sellerId, name:account.shopName, platform:account.platform, enabled:true, sessionStatus:'valid' as const,
+    lastVerifiedAt:at, lastError:null, createdAt:at, updatedAt:at, hasCookies:true};
+  const expired = [{name:'unb',value:'fixture',domain:'.taobao.com',expires:1}];
+  store.saveShop(shop, {...account, cookies:scenario === 'expired' ? expired : account.cookies});
+  store.saveTask({id:'task',shopId:shop.id,name:'daily',enabled:true,scope:'all',productIds:[],
+    schedule:{kind:'daily',time:'08:00',days:[],timezone:'Asia/Shanghai'},version:1,createdAt:at,updatedAt:at,nextRunAt:at});
+  const changed = fixture({principalChange:true}), healthy = fixture({list:[], backend:[]});
+  let repaired = false;
+  const replacement = {...account, cookies:[{name:'unb',value:'replacement',domain:'.taobao.com'}]};
+  const worker = new Worker(store, createCollector({transport:async (url,init) => {
+    if (repaired) return healthy.transport(url,init);
+    if (scenario === 'replaced during request') store.saveShop(shop, replacement);
+    return changed.transport(url,init);
+  }}));
+  try {
+    const scheduler = new Scheduler(store, worker);
+    scheduler.tick(new Date(at));
+    await worker.whenIdle();
+    const [run] = store.listRuns();
+    expect(run).toMatchObject({trigger:'scheduled',status:'auth_required',finishedAt:null,alertDispatchStatus:'pending'});
+    expect(changed.requests).toHaveLength(scenario === 'expired' ? 0 : 1);
+    if (scenario === 'replaced during request') {
+      expect(store.getShop(shop.id)?.sessionStatus).toBe('valid');
+      expect(store.getCredentials(shop.id)).toEqual(replacement);
+    } else {
+      expect(store.getShop(shop.id)?.sessionStatus).toBe('auth_required');
+      scheduler.tick(new Date('2026-11-02T00:00:00Z'));
+      await worker.whenIdle();
+      expect(store.listRuns()).toHaveLength(1);
+      expect(store.db.prepare("SELECT reason FROM schedule_events WHERE outcome='skipped'").get()?.reason).toBe('account_invalid');
+      store.saveShop(shop, replacement);
+    }
+    repaired = true;
+    worker.resume(run!.id);
+    await worker.whenIdle();
+    expect(store.getRun(run!.id)).toMatchObject({status:'success',trigger:'scheduled'});
+    expect(store.listRuns()).toHaveLength(1);
+  } finally { await worker.close(); store.close(); }
+});
 
 describe('HTTP collector',()=>{
   it('exports a Collector implementation',()=>{expect(createCollector()).toHaveProperty('collect');});

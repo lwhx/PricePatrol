@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import type {Collector, CollectedRow} from '../../shared/contracts.js';
 import type {Store, RunRecord} from './database.js';
+import {isInvalidCredentialCode} from './collector/errors.js';
 import {HttpError} from './api-context.js';
 import type {DiagnosticReporter} from './diagnostics.js';
 
@@ -161,7 +162,8 @@ export class Worker {
       const currentShop = this.store.getShop(run.shopId);
       if (currentShop && this.store.getCredentialVersion(run.shopId) === credentialVersion)
         this.store.saveShop({...currentShop, sessionStatus:'valid', lastError:null, updatedAt:now()}, {...credentials, cookies:result.cookies});
-      result.failedProductIds.forEach(id => {if (!completed.has(id)) failures.add(id);});
+      // A saved row stays immutable even when the resumed listing reports its product missing.
+      for (const id of result.failedProductIds) failures.add(id);
       if (run.scope === 'selected') run.productIds.filter(id => !completed.has(id)).forEach(id => failures.add(id));
       run.failedProductIds = [...failures]; run.failed = failures.size; run.processed = attempted.size;
       run.expected = Math.max(run.expected, result.expected); run.rows = this.store.countRunPrices(run.id);
@@ -169,7 +171,7 @@ export class Worker {
       run.message = run.status === 'success' ? '采集完成' : '部分完成，请查看失败与覆盖范围'; run.finishedAt = now();
     } catch (error) {
       if (controller.signal.aborted) {run.status = 'stopped'; run.message = '已停止，可继续';}
-      else if (/AUTH|LOGIN|SESSION|PERMISSION/.test(String((error as {code?:string}).code || ''))) {
+      else if (isInvalidCredentialCode((error as {code?:unknown} | null)?.code)) {
         this.report?.('collection_auth_required', {runId:run.id});
         run.status = 'auth_required'; run.message = '登录失效或权限不足，请更新Cookie并验证后继续';
         const shop = this.store.getShop(run.shopId);

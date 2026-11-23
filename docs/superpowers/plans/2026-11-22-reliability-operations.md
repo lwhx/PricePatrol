@@ -80,7 +80,7 @@
 - [x] Implement atomic incident updates alongside evaluation evidence and frozen notification candidates.
 - [x] Send first/worsening/cooldown reminders and optional recovery; retain every evaluation.
 - [x] Add task controls and lifecycle labels.
-- [ ] Complete independent scoped re-review of lifecycle fixes.
+- [x] Complete independent scoped re-review of lifecycle fixes.
 
 ### Task 7: Performance and export jobs
 
@@ -91,13 +91,15 @@
 - [x] Handle restart/expiry/failure and make UI poll/cancel or download without receiving full large content.
 - [x] Add configurable cross-shop concurrency default 1 with shop exclusion and stop/recovery tests.
 - [x] Run targeted regressions, including export failure recovery and metadata-only download preflight.
-- [ ] Complete independent scoped re-review of export fixes.
+- [x] Complete independent scoped re-review of export fixes.
 
 ### Task 8: Integration, release and documentation
 
 **Files:** README, API contracts, implementation report, CI as necessary.
-- [x] Run `npm run check`: 325 server tests and 69 UI tests passed, one optional local Chromium skip; typecheck and production frontend build passed.
-- [ ] Independent full-branch review of data retention, provenance, lifecycle, auth, exports and UI.
-- [ ] Publish feature branch/PR, wait for CI including real Chromium and Compose validation.
+This checklist is the pre-merge implementation snapshot. Final branch CI, merge and image publication results are recorded by [PR #2](https://github.com/lwhx/PricePatrol/pull/2) and its linked Actions runs, so no new release is created solely to update post-publication checkboxes.
+
+- [x] Run `npm run check` after final review fixes: 335 server tests and 70 UI tests passed, one optional local Chromium skip; typecheck and production frontend build passed.
+- [x] Independent full-branch review of data retention, provenance, lifecycle, auth, exports and UI; five final findings fixed in `6339427`, scoped re-review clean.
+- [x] Publish feature branch/PR #2; initial CI including real Chromium and Compose validation passed. Updated-head CI is still a required merge gate tracked in Actions.
 - [ ] Merge/push with expected head, verify main workflow and multiarch images.
 - [x] Record implemented defaults, local checks and host configuration requirements in `docs/优化实施记录.md`; final release status is recorded by the PR and Actions run.

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { copyFile, link, mkdir, open, readdir, unlink } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, open, readdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { backup, type DatabaseSync } from 'node:sqlite';
+import { backup, DatabaseSync } from 'node:sqlite';
 import { Worker } from 'node:worker_threads';
 
 function snapshotWorker(source: string | null, target: string): Promise<void> {
@@ -59,9 +59,37 @@ export function backupName(owner: string, now: Date): string {
 }
 
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+const backupSuffix = `\\d{8}T\\d{9}Z-${uuid}\\.sqlite`;
+
+// Hold an OS-released SQLite writer lock while reclaiming, writing and rotating in this directory.
+// The lock file stays empty. Keeping its inode also lets cooperating processes share a mounted destination.
+export async function withBackupDirectory(directory: string, owner: string, createDirectory: boolean, work: () => Promise<void>): Promise<void> {
+  if (createDirectory) await mkdir(directory, { recursive:true, mode:0o700 });
+  const lockPath = join(directory, `.pricepatrol-${owner}.lock`);
+  const existing = await lstat(lockPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  if (existing && (!existing.isFile() || existing.size !== 0)) throw Error('备份锁文件不可用');
+  const lock = new DatabaseSync(lockPath);
+  try {
+    // No data is written to this database and contention must not block the service thread.
+    lock.exec('PRAGMA busy_timeout=0; PRAGMA journal_mode=MEMORY; BEGIN IMMEDIATE');
+    const prefix = `.pricepatrol-${owner}-`;
+    const staging = new RegExp(`^${backupSuffix}\\.${uuid}\\.partial$`);
+    for (const entry of await readdir(directory, { withFileTypes:true })) {
+      if (entry.isFile() && entry.name.startsWith(prefix) && staging.test(entry.name.slice(prefix.length))) {
+        await unlink(join(directory, entry.name));
+      }
+    }
+    await work();
+  } finally {
+    lock.close();
+  }
+}
+
 export async function ownedBackups(directory: string, owner: string): Promise<string[]> {
   const prefix = `pricepatrol-${owner}-`;
-  const suffix = new RegExp(`^\\d{8}T\\d{9}Z-${uuid}\\.sqlite$`);
+  const suffix = new RegExp(`^${backupSuffix}$`);
   try {
     const entries = await readdir(directory, { withFileTypes: true });
     return entries.filter(entry => entry.isFile() && entry.name.startsWith(prefix) && suffix.test(entry.name.slice(prefix.length)))
