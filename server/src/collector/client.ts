@@ -64,7 +64,10 @@ function businessFailure(value: any): void {
     const codes = [value?.code, value?.errorCode, value?.subCode, value?.status, ...retCodes];
     const code = codes.map(part => String(part ?? '').split('::', 1)[0]).join(' ');
     const message = [value?.message, value?.msg, value?.errorMsg].join(' ');
-    if (/LIMIT|FREQUENCY|TRAFFIC|FLOOD|RGV587/i.test(code))
+    // MTOP user challenges are not cooldowns; repeating them will not repair the session.
+    if (/(?:^|\s)(?:FAIL_SYS_USER_VALIDATE|RGV587(?:_ERROR)?)(?:\s|$)/i.test(code))
+        fail('VERIFICATION_REQUIRED', '淘宝/天猫要求安全验证，请在原浏览器完成验证后重新导出 Cookie');
+    if (/LIMIT|FREQUENCY|TRAFFIC|FLOOD/i.test(code))
         fail('RATE_LIMIT', '接口访问频繁，请稍后重试');
     const explicitAuth = /TOKEN|SESSION|PERMISSION|AUTH|LOGIN|ILLEGAL_ACCESS|ACCESS_DENIED|INVALID_USER|USER_VALIDATE|SECURITY|RGV|FORBIDDEN|\b(?:401|403)\b/i.test(code);
     const authMessage = /未登录|请[^。；，]{0,12}登录|登录[^。；，]{0,8}(?:失效|过期)|(?:没有|缺少|无|不足)[^。；，]{0,8}权限|权限不足|(?:需要|请完成)人工验证/.test(message);
@@ -140,7 +143,7 @@ function identity(res: any): {
     const name = [res?.seller?.shopName, res?.shop?.title, res?.shop?.name].find(v => typeof v === 'string' && v.trim());
     return { sellerId: id, shopName: name?.trim() ?? `卖家 ${id}` };
 }
-export const fatal = (e: unknown) => e instanceof CollectorError && ['AUTH_REQUIRED', 'COOKIE_INVALID', 'RATE_LIMIT', 'IDENTITY_CHANGED', 'IDENTITY_UNVERIFIED', 'PLATFORM_MISMATCH', 'ABORTED'].includes(e.code);
+export const fatal = (e: unknown) => e instanceof CollectorError && ['AUTH_REQUIRED', 'COOKIE_INVALID', 'VERIFICATION_REQUIRED', 'RATE_LIMIT', 'IDENTITY_CHANGED', 'IDENTITY_UNVERIFIED', 'PLATFORM_MISMATCH', 'ABORTED'].includes(e.code);
 interface ProductDetail {
     res: any;
     url: string;

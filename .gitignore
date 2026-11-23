@@ -18,3 +18,5 @@ test-results/
 *.pem
 *.key
 taobao-cookies-*.json
+# tsx worker threads given an empty environment fall back to a literal "undefined" temp root.
+undefined/

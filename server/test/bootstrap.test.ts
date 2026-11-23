@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { prepareBootstrap } from '../src/bootstrap.js';
+// Windows does not map POSIX modes: a 0o600 request surfaces as 0o666 there.
+const privateFileMode = process.platform === 'win32' ? 0o666 : 0o600;
 import { Store } from '../src/database.js';
 import { verifyPassword } from '../src/security.js';
 
@@ -30,10 +32,10 @@ it('persists a shared, private setup token across production restarts', async ()
 
   const path = join(dataDir, '.setup-token');
   expect((await readFile(path, 'utf8')).trim()).toBe(first);
-  expect((await stat(path)).mode & 0o777).toBe(0o600);
+  expect((await stat(path)).mode & 0o777).toBe(privateFileMode);
   await chmod(path, 0o644);
   expect(await prepareBootstrap(store, dataDir, env)).toBe(first);
-  expect((await stat(path)).mode & 0o777).toBe(0o600);
+  expect((await stat(path)).mode & 0o777).toBe(privateFileMode);
 });
 
 it('prioritizes the supplied setup token without writing it to disk', async () => {

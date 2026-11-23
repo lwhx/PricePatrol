@@ -4,7 +4,7 @@ import {backupDatabase} from './backup.js';
 import {Vault} from './security.js';
 import {queryStore,queryAllStore,registerQueryFunctions} from './query.js';
 import {moneyCents,formatDiscount,rowKey} from './domain.js';
-import {migrateCollectionAlerts} from './migrations.js';
+import {migrateCollectionAlerts,migrateShopArchival} from './migrations.js';
 import {COLLECTION_SUBMISSION_TTL_MS} from './collection-submissions.js';
 import {initializeIncidents,supersedeTaskIncidents} from './incidents.js';
 import {unfinishedRetryParentGuard} from './retention.js';
@@ -33,6 +33,7 @@ export class Store {
    CREATE TABLE IF NOT EXISTS queries(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
   `);
   migrateCollectionAlerts(this.db);
+  migrateShopArchival(this.db);
   // The collection/alert migration rebuilds alerts. Install retention indexes on the final schema.
   this.db.exec(`CREATE INDEX IF NOT EXISTS latest_run ON latest(run_id);
    CREATE INDEX IF NOT EXISTS alerts_run ON alerts(run_id);`);
@@ -46,17 +47,40 @@ export class Store {
   const previous=this.getShop(shop.id);
   if(previous&&(previous.sellerId!==shop.sellerId||previous.platform!==shop.platform))throw Error('店铺身份不可更改');
   if(credentials&&(credentials.sellerId!==shop.sellerId||credentials.platform!==shop.platform))throw Error('凭据与店铺不匹配');
-  const safe:Shop={id:shop.id,name:shop.name,sellerId:shop.sellerId,platform:shop.platform,enabled:shop.enabled,sessionStatus:shop.sessionStatus,lastVerifiedAt:shop.lastVerifiedAt,lastError:shop.lastError,createdAt:shop.createdAt,updatedAt:shop.updatedAt,hasCookies:!!credentials||!!previous?.hasCookies};
-  this.db.prepare('INSERT INTO shops(id,payload,credentials,credential_version) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,credentials=coalesce(excluded.credentials,shops.credentials),credential_version=shops.credential_version+excluded.credential_version').run(shop.id,JSON.stringify(safe),credentials?this.vault.seal(credentials):null,credentials?1:0);
+  // Saving live credentials onto an archived (removed) row would silently resurrect the account.
+  if(previous?.archivedAt&&!credentials&&previous.hasCookies)throw Error('店铺已移除，请重新导入核验后再启用');
+  const safe:Shop={id:shop.id,name:shop.name,sellerId:shop.sellerId,platform:shop.platform,enabled:shop.enabled,sessionStatus:shop.sessionStatus,lastVerifiedAt:shop.lastVerifiedAt,lastError:shop.lastError,createdAt:shop.createdAt,updatedAt:shop.updatedAt,hasCookies:!!credentials||!!previous?.hasCookies,...(shop.archivedAt!==undefined||previous?.archivedAt!==undefined?{archivedAt:shop.archivedAt??previous?.archivedAt??null}:{})};
+  this.db.prepare('INSERT INTO shops(id,payload,credentials,credential_version,archived_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,credentials=coalesce(excluded.credentials,shops.credentials),credential_version=shops.credential_version+excluded.credential_version,archived_at=coalesce(excluded.archived_at,shops.archived_at)').run(shop.id,JSON.stringify(safe),credentials?this.vault.seal(credentials):null,credentials?1:0,safe.archivedAt??null);
  }
  getShop(id:string):Shop|undefined{return this.readOne<Shop>('SELECT payload FROM shops WHERE id=?',id);}
- listShops():Shop[]{return this.readMany<Shop>('SELECT payload FROM shops ORDER BY id');}
+ listShops():Shop[]{return this.readMany<Shop>("SELECT payload FROM shops WHERE archived_at IS NULL ORDER BY id");}
+ listArchivedShops():Shop[]{return this.readMany<Shop>('SELECT payload FROM shops WHERE archived_at IS NOT NULL ORDER BY id');}
+ /** Removing an account keeps its evidence but permanently destroys the stored credentials. */
+ removeShop(id:string):void{
+  const shop=this.getShop(id);
+  if(!shop)throw Error('店铺不存在');
+  if(shop.archivedAt)return;
+  const at=new Date().toISOString();
+  const archived:Shop={...shop,enabled:false,sessionStatus:'disabled',lastError:null,hasCookies:false,updatedAt:at,archivedAt:at};
+  this.db.prepare('UPDATE shops SET payload=?,credentials=NULL,credential_version=credential_version+1,archived_at=? WHERE id=?').run(JSON.stringify(archived),at,id);
+  // Archived rows are valid evidence owners but must never pass the live-account guards.
+  for(const table of ['tasks','alert_tasks']){
+   const rows=this.db.prepare(`SELECT id,payload FROM ${table} WHERE shop_id=? AND deleted=0`).all(id) as {id:string;payload:string}[];
+   for(const row of rows){
+    const payload=JSON.parse(row.payload) as {enabled:boolean;version:number};
+    const updated=JSON.stringify({...payload,enabled:false,nextRunAt:null,updatedAt:at,version:payload.version+1});
+    this.db.prepare(`UPDATE ${table} SET payload=? WHERE id=?`).run(updated,row.id);
+   }
+  }
+ }
  getCredentials(id:string):VerifiedAccount{const record=this.db.prepare('SELECT credentials FROM shops WHERE id=?').get(id);if(!record?.credentials)throw Error('店铺未配置凭据');return this.vault.open<VerifiedAccount>(String(record.credentials));}
  getCredentialVersion(id:string):number{return Number(this.db.prepare('SELECT credential_version FROM shops WHERE id=?').get(id)?.credential_version||0);}
  setConfig(key:string,value:unknown):void{this.db.prepare('INSERT INTO config VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload').run(key,JSON.stringify(value));}
  getConfig<T>(key:string,fallback:T):T{return this.readOne<T>('SELECT payload FROM config WHERE key=?',key)??fallback;}
  saveTask(task:CollectionTask):void{
-  if(!this.getShop(task.shopId))throw Error('店铺不存在');
+  const shop=this.getShop(task.shopId);
+  if(!shop)throw Error('店铺不存在');
+  if(shop.archivedAt&&task.enabled)throw Error('店铺已移除，任务不可启用，请重新导入账号');
   const previous=this.readOne<CollectionTask>('SELECT payload FROM tasks WHERE id=?',task.id);
   if(previous&&previous.shopId!==task.shopId)throw Error('任务归属不可更改');
   const {id,shopId,name,enabled,scope,productIds,schedule,version,createdAt,updatedAt,nextRunAt}=task;
@@ -68,6 +92,8 @@ export class Store {
  saveAlertTask(task:AlertTask):void{
   const collection=this.getTask(task.collectionTaskId);
   if(!collection||collection.shopId!==task.shopId)throw Error('预警任务与采集任务店铺不匹配');
+  const shop=this.getShop(task.shopId);
+  if(shop?.archivedAt&&task.enabled)throw Error('店铺已移除，任务不可启用，请重新导入账号');
   const old=this.readOne<AlertTask>('SELECT payload FROM alert_tasks WHERE id=?',task.id);
   if(old&&(old.collectionTaskId!==task.collectionTaskId||old.shopId!==task.shopId))throw Error('预警任务归属不可更改');
   this.transaction(()=>{
@@ -99,7 +125,7 @@ export class Store {
  getRun(id:string):RunRecord|undefined{return this.readOne<RunRecord>('SELECT payload FROM runs WHERE id=?',id);}
  listRuns():RunRecord[]{return this.readMany<RunRecord>('SELECT payload FROM runs ORDER BY created_at DESC,id DESC LIMIT 200');}
  operationalRuns(statuses:RunStatus[]):RunRecord[]{return this.readMany<RunRecord>("SELECT payload FROM runs WHERE json_extract(payload,'$.status') IN(SELECT value FROM json_each(?)) ORDER BY created_at,id",JSON.stringify(statuses));}
- pendingAlertCollections():RunRecord[]{return this.readMany<RunRecord>("SELECT payload FROM runs WHERE json_extract(payload,'$.trigger')='scheduled' AND json_extract(payload,'$.alertDispatchStatus')='pending' AND json_extract(payload,'$.finishedAt') IS NOT NULL AND json_extract(payload,'$.status') IN('success','partial') ORDER BY created_at,id");}
+ pendingAlertCollections():RunRecord[]{return this.readMany<RunRecord>("SELECT payload FROM runs WHERE json_extract(payload,'$.trigger')='scheduled' AND json_extract(payload,'$.alertDispatchStatus')='pending' AND json_extract(payload,'$.finishedAt') IS NOT NULL AND json_extract(payload,'$.status') IN('success','partial') AND shop_id NOT IN(SELECT id FROM shops WHERE archived_at IS NOT NULL) ORDER BY created_at,id");}
  saveAlertRun(run:AlertRunRecord):void{
   const source=this.getRun(run.collectionRunId);
   const task=this.readOne<AlertTask>('SELECT payload FROM alert_tasks WHERE id=?',run.alertTaskId);
@@ -230,7 +256,7 @@ export class Store {
  }
  overview():Overview{
   const scalar=(sql:string)=>Number(this.db.prepare(sql).get()?.n||0);
-  return {shops:scalar('SELECT count(*) n FROM shops'),tasks:scalar('SELECT count(*) n FROM tasks WHERE deleted=0'),alertTasks:scalar('SELECT count(*) n FROM alert_tasks WHERE deleted=0'),products:scalar('SELECT count(*) n FROM(SELECT 1 FROM latest GROUP BY shop_id,product_id)'),skus:scalar('SELECT count(*) n FROM latest'),pendingAlerts:scalar("SELECT (SELECT count(*) FROM alert_incidents WHERE json_extract(payload,'$.state')='pending') + (SELECT count(*) FROM alerts WHERE json_extract(payload,'$.state')='pending' AND json_extract(payload,'$.incidentId') IS NULL) n"),running:scalar("SELECT count(*) n FROM runs WHERE json_extract(payload,'$.status') IN('queued','running')"),failedRows:scalar("SELECT count(*) n FROM latest WHERE json_extract(payload,'$.stale')=1 OR json_extract(payload,'$.status')!='ok'"),recentRuns:this.listRuns().slice(0,10).map(({taskSnapshot:_,alertTaskSnapshots:__,...run})=>run)};
+  return {shops:scalar('SELECT count(*) n FROM shops WHERE archived_at IS NULL'),tasks:scalar('SELECT count(*) n FROM tasks WHERE deleted=0'),alertTasks:scalar('SELECT count(*) n FROM alert_tasks WHERE deleted=0'),products:scalar('SELECT count(*) n FROM(SELECT 1 FROM latest GROUP BY shop_id,product_id)'),skus:scalar('SELECT count(*) n FROM latest'),pendingAlerts:scalar("SELECT (SELECT count(*) FROM alert_incidents WHERE json_extract(payload,'$.state')='pending') + (SELECT count(*) FROM alerts WHERE json_extract(payload,'$.state')='pending' AND json_extract(payload,'$.incidentId') IS NULL) n"),running:scalar("SELECT count(*) n FROM runs WHERE json_extract(payload,'$.status') IN('queued','running')"),failedRows:scalar("SELECT count(*) n FROM latest WHERE json_extract(payload,'$.stale')=1 OR json_extract(payload,'$.status')!='ok'"),recentRuns:this.listRuns().slice(0,10).map(({taskSnapshot:_,alertTaskSnapshots:__,...run})=>run)};
  }
  backup(destination:string):Promise<void>{return backupDatabase(this.db,destination);}
  query(input:QueryInput):QueryResult{return queryStore(this,input);}

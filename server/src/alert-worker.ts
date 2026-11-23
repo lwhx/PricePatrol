@@ -54,6 +54,18 @@ export class AlertWorker {
 
   async whenIdle(): Promise<void> {while (this.draining || this.delivering) await Promise.all([this.draining, this.delivering]);}
   async close(): Promise<void> {this.closed = true; await this.whenIdle();}
+  /** Frozen evaluations still waiting to run for one shop; account removal retires them. */
+  queuedForShop(shopId: string): string[] {
+    return this.store.operationalAlertRuns(['queued']).filter(run => run.shopId === shopId).map(run => run.id);
+  }
+  /** Retire a queued evaluation; finished evidence and its collection batch stay untouched. */
+  async cancel(id: string): Promise<void> {
+    const run = this.store.getAlertRun(id);
+    if (!run || run.status !== 'queued') return;
+    run.status = 'failed'; run.finishedAt = now(); run.message = '账号已移除，预警检查已取消';
+    run.notificationStatus = 'skipped';
+    this.store.saveAlertRun(run);
+  }
   private kick(): void {
     if (this.closed || this.draining) return;
     this.draining = Promise.resolve().then(() => this.drain()).finally(() => {

@@ -51,3 +51,18 @@ export function migrateCollectionAlerts(db: DatabaseSync): void {
     throw error;
   }
 }
+
+/** Removed accounts stay as rows (prices/runs/alerts reference them) but leave the active account list. */
+export function migrateShopArchival(db: DatabaseSync): void {
+  const version = db.prepare("SELECT payload FROM config WHERE key='schema.shop-archival'").get();
+  if (version && JSON.parse(String(version.payload)) >= 1) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec('ALTER TABLE shops ADD COLUMN archived_at TEXT');
+    db.prepare("INSERT INTO config(key,payload) VALUES('schema.shop-archival','1')").run();
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}

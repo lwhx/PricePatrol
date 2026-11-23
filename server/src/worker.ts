@@ -93,10 +93,14 @@ export class Worker {
 
   async whenIdle(): Promise<void> {while (this.draining || this.jobs.size) await Promise.all([this.draining, ...this.jobs.values()]);}
   async close(): Promise<void> {this.closed = true; for (const item of this.active.values()) item.controller.abort(); await this.whenIdle();}
+  /** Run ids currently executing; account removal aborts them. */
+  activeShopIds(): string[] { return [...this.active.keys()]; }
   private requireRun(id: string): RunRecord {const run = this.store.getRun(id); if (!run) throw new HttpError(400, '采集记录不存在'); return run;}
   private requireValidShop(id: string): void {
     const shop = this.store.getShop(id);
-    if (!shop?.enabled || shop.sessionStatus !== 'valid') throw new HttpError(400, '请先验证店铺登录状态');
+    if (!shop) throw new HttpError(400, '请先验证店铺登录状态');
+    if (shop.archivedAt) throw new HttpError(400, '店铺已移除，无法继续，请重新导入账号');
+    if (!shop.enabled || shop.sessionStatus !== 'valid') throw new HttpError(400, '请先验证店铺登录状态');
   }
   private kick(): void {
     if (this.closed || this.draining) return;
@@ -173,7 +177,10 @@ export class Worker {
       if (controller.signal.aborted) {run.status = 'stopped'; run.message = '已停止，可继续';}
       else if (isInvalidCredentialCode((error as {code?:unknown} | null)?.code)) {
         this.report?.('collection_auth_required', {runId:run.id});
-        run.status = 'auth_required'; run.message = '登录失效或权限不足，请更新Cookie并验证后继续';
+        run.status = 'auth_required';
+        run.message = (error as {code?:unknown} | null)?.code === 'VERIFICATION_REQUIRED'
+          ? '淘宝/天猫要求安全验证，请在原浏览器完成验证，更新 Cookie 并核验后继续'
+          : '登录失效或权限不足，请更新Cookie并验证后继续';
         const shop = this.store.getShop(run.shopId);
         if (shop && this.store.getCredentialVersion(run.shopId) === credentialVersion)
           this.store.saveShop({...shop, sessionStatus:'auth_required', lastError:run.message, updatedAt:now()});
@@ -186,6 +193,9 @@ export class Worker {
     } finally {
       run.failedProductIds = [...failures]; run.failed = failures.size; run.processed = attempted.size;
       run.rows = this.store.countRunPrices(run.id);
+      // An aborted run is terminal: the user retired it (stop or account removal), so it
+      // cannot be resumed and must carry a completion time like every other finished report.
+      if (run.status === 'stopped') run.finishedAt ??= now();
       this.store.saveRun(run);
     }
     if (run.trigger === 'scheduled' && run.finishedAt && ['success', 'partial'].includes(run.status) && this.onCompleted) {

@@ -31,7 +31,10 @@ async function publish(destination: string, createDirectory: boolean, write: (pa
     await handle.sync();
     await link(partial, target);
     const directory = await open(dir, 'r');
-    try { await directory.sync(); } finally { await directory.close(); }
+    try {
+      // Windows does not permit fsync on directory handles; the atomic link already publishes the file.
+      await directory.sync().catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EPERM') throw error; });
+    } finally { await directory.close(); }
   } finally {
     await handle.close();
     await unlink(partial);

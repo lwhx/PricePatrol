@@ -9,6 +9,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Store } from '../src/database.js';
 import { MaintenanceService } from '../src/maintenance.js';
 import { backupName, copyBackup, ownedBackups, withBackupDirectory } from '../src/backup.js';
+// Windows does not map POSIX modes: a 0o600 request surfaces as 0o666 there.
+const privateFileMode = process.platform === 'win32' ? 0o666 : 0o600;
 
 const key = 'maintenance-unittest-key-kept-separately';
 const teardown: Array<() => Promise<void>> = [];
@@ -71,7 +73,7 @@ it('creates an independently readable snapshot of committed WAL data without ove
   store.setConfig('wal-test', 'changed');
   await expect(store.backup(target)).rejects.toThrow();
   expect(await readFile(target)).toEqual(original);
-  expect((await stat(target)).mode & 0o777).toBe(0o600);
+  expect((await stat(target)).mode & 0o777).toBe(privateFileMode);
   expect((await readdir(dir)).some(name => name.startsWith('.one.sqlite.'))).toBe(false);
 });
 
@@ -106,7 +108,7 @@ it('validates the copy before publication and rotates only completed files owned
   expect(completed).toHaveLength(1);
   for (const destination of [local, remote]) {
     const current = join(destination, completed[0]);
-    expect((await stat(current)).mode & 0o777).toBe(0o600);
+    expect((await stat(current)).mode & 0o777).toBe(privateFileMode);
     expect(inspect(current, db => db.prepare('PRAGMA integrity_check').get()?.integrity_check)).toBe('ok');
   }
   expect(await service.status()).toMatchObject({ backupCount: 1, backupCopyConfigured: true, backupError: null, copyError: null });
