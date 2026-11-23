@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
+import {getIncident,listIncidents,updateIncident} from './incidents.js';
 import type {AlertRun, AlertTask, ProductRow} from '../../shared/contracts.js';
 import type {AlertRunRecord, Store} from './database.js';
 import {alertTaskSchema, whitelistSchema} from './validation.js';
@@ -19,6 +20,17 @@ function publicAlertRun(run:AlertRunRecord):AlertRun {
 
 export function registerAlertTasks(ctx:ApiContext):void {
   const {app,store}=ctx;
+  const state=z.enum(['pending','confirmed','resolved']);
+  app.get('/api/incidents',async request=>listIncidents(store,z.object({
+    status:z.enum(['all','active','recovered','superseded']).default('active'),state:state.optional(),
+    shopId:z.string().min(1).max(100).optional(),alertTaskId:z.string().min(1).max(100).optional(),
+    page:z.coerce.number().int().min(1).max(1000000).default(1),pageSize:z.coerce.number().int().min(1).max(200).default(100),
+  }).parse(request.query)));
+  app.get<{Params:{id:string}}>('/api/incidents/:id',async request=>({incident:getIncident(store,request.params.id)}));
+  app.patch<{Params:{id:string}}>('/api/incidents/:id',async request=>{
+    const patch=z.strictObject({state:state.optional(),note:z.string().max(2000).optional()}).parse(request.body);
+    return {incident:updateIncident(store,request.params.id,patch)};
+  });
   app.get('/api/alert-tasks',async()=>({tasks:store.listAlertTasks()}));
   app.get<{Params:{id:string}}>('/api/alert-tasks/:id',async request=>({task:requireValue(store.getAlertTask(request.params.id),'预警任务不存在')}));
   app.post('/api/alert-tasks',async request=>{

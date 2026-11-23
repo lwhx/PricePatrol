@@ -14,9 +14,15 @@ export async function registerAuth(app:FastifyInstance,store:Store,allowedOrigin
   const requireSetupToken=process.env.NODE_ENV==='production' || !!setupTokenDigest;
   const authenticated=(token?:string)=>!!token&&!!store.db.prepare('SELECT hash FROM auth_sessions WHERE hash=? AND expires>?').get(tokenHash(token),Date.now());
   app.addHook('onRequest',async(request)=>{
-    if(!request.url.startsWith('/api/'))return;
+    const route=request.routeOptions.url;
+    if(!route||route==='/*'){
+      // A static wildcard or a missing route has no API template to classify.
+      let path:string;
+      try{path=new URL(request.url,'http://localhost').pathname;}catch{throw new HttpError(400,'请求路径无效');}
+      if(!path.startsWith('/api/'))return;
+    }else if(!route.startsWith('/api/'))return;
     if(!['GET','HEAD','OPTIONS'].includes(request.method)&&request.headers.origin){let good=false;try{const origin=new URL(request.headers.origin);good=origin.host===request.headers.host||allowedOrigins.includes(origin.origin);}catch{}if(!good)throw new HttpError(403,'不允许来自其他网站的操作');}
-    const path=request.url.split('?')[0];if(['/api/health','/api/auth/status','/api/auth/setup','/api/auth/login'].includes(path!))return;
+    if(route&&['/api/health','/api/auth/status','/api/auth/setup','/api/auth/login'].includes(route))return;
     if(!authenticated(request.cookies[COOKIE]))throw new HttpError(401,'请先登录');
   });
   app.get('/api/auth/status',async request=>{

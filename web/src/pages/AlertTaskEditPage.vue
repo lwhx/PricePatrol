@@ -2,6 +2,7 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { AlertTask, AlertTaskInput, CollectionTask, Shop } from '../../../shared/contracts.js';
+import type { NotificationPolicy } from '../../../shared/incidents.js';
 import { get, post, patch } from '../api/client';
 import { parseIds, lines } from '../lib/format';
 import { useFeedback } from '../composables/useFeedback';
@@ -13,6 +14,8 @@ const editing = computed(() => typeof route.params.id === 'string' ? route.param
 const { busy, error, act } = useFeedback();
 const loading = ref(true), collections = ref<CollectionTask[]>([]), shops = ref<Shop[]>([]);
 const productText = ref(''), whiteIdText = ref(''), whiteKeywordText = ref('');
+const defaultNotificationPolicy: NotificationPolicy = { cooldownHours: 24, notifyRecovery: false };
+const notificationPolicy = reactive({ ...defaultNotificationPolicy });
 const preview = ref<{ count: number; products: { productId: string; title: string }[] } | null>(null);
 const form = reactive<AlertTaskInput>({ name: '', collectionTaskId: '', enabled: true, scope: 'all', productIds: [], rules: [{ mode: 'all', conditions: [{ field: 'discount', op: 'lt', value: '8.5' }] }], whitelist: { productIds: [], titleKeywords: [] }, notify: true });
 const source = computed(() => collections.value.find(task => task.id === form.collectionTaskId));
@@ -27,9 +30,12 @@ function payload(): AlertTaskInput {
   if (form.scope === 'selected' && !productIds.length) throw new Error('指定预警范围至少需要一个有效商品 ID');
   if (!form.rules.length) throw new Error('请至少添加一组预警条件');
   if (form.rules.some(group => !group.conditions.length || group.conditions.some(condition => !condition.value.trim()))) throw new Error('请填写全部规则值，并移除空条件组');
-  return JSON.parse(JSON.stringify({ name: form.name.trim(), collectionTaskId: form.collectionTaskId, enabled: form.enabled, scope: form.scope, productIds, rules: form.rules, whitelist: whitelist(), notify: form.notify }));
+  if (!Number.isInteger(notificationPolicy.cooldownHours) || notificationPolicy.cooldownHours < 0 || notificationPolicy.cooldownHours > 8760) {
+    throw new Error('持续异常提醒间隔须为 0 至 8760 小时的整数');
+  }
+  return JSON.parse(JSON.stringify({ name: form.name.trim(), collectionTaskId: form.collectionTaskId, enabled: form.enabled, scope: form.scope, productIds, rules: form.rules, whitelist: whitelist(), notify: form.notify, notificationPolicy }));
 }
-async function save() { await act(async () => { const body = payload(); if (editing.value) await patch(`/alert-tasks/${editing.value}`, body); else await post('/alert-tasks', body); await router.push('/alert-tasks'); }, '预警任务已保存，配置将在之后创建的定时批次生效'); }
+async function save() { if (busy.value || loading.value) return; await act(async () => { const body = payload(); if (editing.value) await patch(`/alert-tasks/${editing.value}`, body); else await post('/alert-tasks', body); await router.push('/alert-tasks'); }, '预警任务已保存，配置将在之后创建的定时批次生效'); }
 async function previewWhitelist() { if (!editing.value) return; await act(async () => { preview.value = await post(`/alert-tasks/${editing.value}/whitelist/preview`, whitelist()); }); }
 onMounted(async () => {
   await act(async () => {
@@ -38,6 +44,7 @@ onMounted(async () => {
       const task = (await get<{ tasks: AlertTask[] }>('/alert-tasks')).tasks.find(item => item.id === editing.value);
       if (!task) throw new Error('该预警任务不存在或已删除');
       Object.assign(form, { name: task.name, collectionTaskId: task.collectionTaskId, enabled: task.enabled, scope: task.scope, productIds: task.productIds, rules: task.rules, whitelist: task.whitelist, notify: task.notify });
+      Object.assign(notificationPolicy, defaultNotificationPolicy, task.notificationPolicy);
       productText.value = task.productIds.join('\n'); whiteIdText.value = task.whitelist.productIds.join('\n'); whiteKeywordText.value = task.whitelist.titleKeywords.join('\n');
     } else {
       const requested = typeof route.query.collectionTaskId === 'string' ? route.query.collectionTaskId : '';
@@ -73,7 +80,7 @@ onMounted(async () => {
         <div class="panel-head"><h2>03 · 预警白名单</h2><el-button :disabled="!editing || loading" :loading="busy" @click="previewWhitelist">预览数据库命中</el-button></div>
         <div class="panel-body"><div class="split-layout"><el-form-item label="排除商品 ID / 链接"><el-input v-model="whiteIdText" type="textarea" :rows="5" placeholder="每行一个，排除该商品全部 SKU" /></el-form-item><el-form-item label="排除标题关键词"><el-input v-model="whiteKeywordText" type="textarea" :rows="5" placeholder="每行一个普通文本关键词，包含任意一条即排除" /></el-form-item></div><div class="pill-note">白名单只影响当前预警任务；商品仍会采集、入库并保留价格历史，其他预警任务独立判断。</div><div v-if="preview" style="margin-top:16px"><p class="section-title">命中 {{ preview.count }} 个商品（展示部分）</p><el-table :data="preview.products" max-height="260" empty-text="当前数据库没有命中商品"><el-table-column prop="productId" label="商品 ID" width="190" /><el-table-column prop="title" label="标题" /></el-table></div></div>
       </section>
-      <section class="panel"><div class="panel-head"><h2>04 · 预警汇总通知</h2></div><div class="panel-body"><el-form-item label="Server酱汇总通知"><el-switch v-model="form.notify" active-text="预警检查完成后发送汇总" /><span class="form-hint">需要在系统设置中启用 Server酱并配置 SendKey。通知失败可在预警执行记录中独立重试。</span></el-form-item><div class="pill-note">只有定时采集批次完成或部分完成后才执行预警。预警配置在定时采集入队时固定，修改只影响之后创建的批次。手动采集不触发预警或自动汇总。</div></div></section>
+      <section class="panel"><div class="panel-head"><h2>04 · 预警汇总通知</h2></div><div class="panel-body"><el-form-item label="Server酱汇总通知"><el-switch v-model="form.notify" active-text="预警检查完成后发送汇总" /><span class="form-hint">需要在系统设置中启用 Server酱并配置 SendKey。通知失败可在预警执行记录中独立重试。</span></el-form-item><div class="split-layout"><el-form-item label="持续异常提醒间隔（小时）"><el-input-number v-model="notificationPolicy.cooldownHours" :min="0" :max="8760" :precision="0" /><span class="form-hint">默认24小时；0表示每次命中均可提醒。首次出现和确认恶化可立即提醒。</span></el-form-item><el-form-item label="恢复通知"><el-switch v-model="notificationPolicy.notifyRecovery" active-text="有效价格确认恢复后提醒" /><span class="form-hint">缺失、陈旧或白名单排除的价格不会判为恢复。</span></el-form-item></div><div class="pill-note">只有定时采集批次完成或部分完成后才执行预警。预警配置在定时采集入队时固定，修改只影响之后创建的批次。手动采集不触发预警或自动汇总。</div></div></section>
     </el-form>
     <div class="header-actions"><el-button @click="$router.push('/alert-tasks')">返回列表</el-button><el-button type="primary" :loading="busy" :disabled="loading" @click="save">保存预警任务</el-button></div>
   </div>

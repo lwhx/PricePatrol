@@ -22,6 +22,7 @@ async function notify(run: AlertRun) {
       <p v-if="row.status === 'partial'" class="warning-text">覆盖不完整：本次只检查来源批次中可用的价格，未覆盖或无法判断的商品不能视为价格正常。</p>
       <p v-else-if="row.unknown" class="warning-text">存在无法判断的 SKU；缺失价格不视为价格正常。</p>
       <div class="inline-metrics"><span>来源 SKU {{ row.rows }}</span><span>已检查 {{ row.checked }}</span><span>白名单排除 {{ row.excluded }}</span><span>命中 {{ row.matched }}</span><span>无法判断 {{ row.unknown }}</span></div>
+      <div v-if="row.lifecycle" class="inline-metrics"><span>首次 {{ row.lifecycle.first }}</span><span>持续 {{ row.lifecycle.continuing }}</span><span>恶化 {{ row.lifecycle.worsened }}</span><span>恢复 {{ row.lifecycle.recovered }}</span><span>本次通知候选 {{ row.notificationCount ?? 0 }}</span></div>
       <p>启动：{{ dateTime(row.startedAt) }} · 结束：{{ dateTime(row.finishedAt) }}</p>
       <p>来源采集批次：<router-link :to="{ path: '/tasks', query: { tab: 'runs', runId: row.collectionRunId } }">{{ row.collectionRunId }}</router-link></p>
       <router-link :to="{ path: '/prices', state: { priceQuery: { view: 'sku', runId: row.collectionRunId } } }">查看来源批次价格证据</router-link>
@@ -32,7 +33,7 @@ async function notify(run: AlertRun) {
     <el-table-column label="检查状态" min-width="145"><template #default="{ row }"><el-tag v-if="row.status === 'running'" type="primary" size="small">检查中</el-tag><StatusTag v-else :value="row.status" /><div v-if="row.status === 'partial'" class="cell-sub warning-text">覆盖不完整</div></template></el-table-column>
     <el-table-column label="检查 / 排除" min-width="125"><template #default="{ row }">{{ row.checked }} / {{ row.excluded }}<div class="cell-sub">来源 SKU {{ row.rows }}</div></template></el-table-column>
     <el-table-column label="命中 / 无法判断" min-width="135"><template #default="{ row }"><strong>{{ row.matched }}</strong> / {{ row.unknown }}</template></el-table-column>
-    <el-table-column label="通知" width="115"><template #default="{ row }"><StatusTag :value="row.notificationStatus" /></template></el-table-column>
+    <el-table-column label="通知" width="115"><template #default="{ row }"><StatusTag :value="row.notificationStatus" /><div v-if="row.notificationCount !== undefined" class="cell-sub">本次 {{ row.notificationCount }} 条</div></template></el-table-column>
     <el-table-column label="创建时间" min-width="170"><template #default="{ row }">{{ dateTime(row.createdAt) }}</template></el-table-column>
     <el-table-column label="操作" min-width="200" fixed="right"><template #default="{ row }"><router-link :to="{ path: '/alerts', query: { alertRunId: row.id } }">预警记录</router-link><el-button v-if="canNotify(row)" text :disabled="busy" @click="notify(row)">重发汇总</el-button></template></el-table-column>
   </el-table>

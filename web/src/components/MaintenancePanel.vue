@@ -37,7 +37,7 @@ const bytes=(value?:number)=>value===undefined?'—':`${(value/1024/1024).toFixe
     <el-form-item label="备份间隔（小时）"><el-input-number v-model="form.backupIntervalHours" :min="1" :max="8760" /></el-form-item>
     <el-form-item label="保留备份份数"><el-input-number v-model="form.backupKeep" :min="1" :max="365" /></el-form-item>
    </div></el-form>
-   <p class="pill-note">预警证据从处理完成时间起计算保留期。零命中的预警检查随普通历史到期清理。仍在持续的异常保留其关联证据。</p>
+   <p class="pill-note">预警证据从人工处理与证据产生的较晚时间起计算保留期。零命中的预警检查随普通历史到期清理。仍在持续的异常保留其关联证据。</p>
   </div>
  </section>
  <section class="panel">

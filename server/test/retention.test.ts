@@ -38,8 +38,7 @@ it('protects unresolved, recently resolved, unfinished, pending dispatch and fai
 });
 it('protects active incident first and last evidence even after manual acknowledgement',()=>{
  const {store,batch}=fixture();batch('first',{matched:true});batch('last');batch('unrelated');
- store.db.exec('CREATE TABLE alert_incidents(id TEXT PRIMARY KEY,payload TEXT NOT NULL)');
- store.db.prepare('INSERT INTO alert_incidents VALUES(?,?)').run('incident',JSON.stringify({status:'active',firstCollectionRunId:'first',lastCollectionRunId:'last'}));
+ store.db.prepare('INSERT INTO alert_incidents(id,identity,alert_task_id,payload) VALUES(?,?,?,?)').run('incident','identity','a',JSON.stringify({status:'active',firstCollectionRunId:'first',lastCollectionRunId:'last'}));
  expect(cleanupRetention(store,policy)).toMatchObject({runs:1,alertRuns:1,prices:1,alerts:0});expect(store.getRun('first')).toBeDefined();expect(store.getRun('last')).toBeDefined();
 });
 it('starts the evidence retention period when an old pending alert is resolved',()=>{
@@ -49,4 +48,39 @@ it('starts the evidence retention period when an old pending alert is resolved',
  expect(store.updateAlert('old:event',{note:'confirmed resolution'}).resolvedAt).toBe(resolved.resolvedAt);
  expect(cleanupRetention(store,policy).deleted).toBe(0);
  expect(store.updateAlert('old:event',{state:'pending'}).resolvedAt).toBeUndefined();
+});
+
+it('protects parents of queued, active and resumable retries through both cleanup paths',()=>{
+ for(const status of ['queued','running','stopped','recoverable','auth_required'] as const){
+  const {store,batch}=fixture();batch('parent');
+  store.db.prepare('DELETE FROM alert_runs WHERE collection_run_id=?').run('parent');
+  const parent=store.getRun('parent')!;
+  const child:RunRecord={...parent,id:'retry',parentRunId:parent.id,status,createdAt:'2025-01-01T00:00:00.000Z',finishedAt:null,trigger:'manual',alertDispatchStatus:'not_applicable',alertTaskSnapshots:[]};
+  store.saveRun(child);
+  expect(previewRetention(store,policy).runs).toBe(0);
+  expect(cleanupRetention(store,policy).deleted).toBe(0);
+  expect(store.cleanup(policy.historyBefore)).toBe(0);
+  expect(()=>store.saveRun({...child,status:'running',message:'continued'})).not.toThrow();
+  store.saveRun({...child,status:'success',finishedAt:'2025-01-02T00:00:00.000Z'});
+  expect(cleanupRetention(store,policy).runs).toBe(1);
+ }
+});
+
+it('uses current incident workflow for linked immutable evidence and preserves active incident anchors',()=>{
+ const {store,batch}=fixture();batch('linked',{matched:true,state:'pending'});
+ store.db.prepare("UPDATE alerts SET payload=json_set(payload,'$.incidentId','episode') WHERE id='linked:event'").run();
+ const write=(state:string,status:string,resolvedAt:string|null)=>store.db.prepare('INSERT INTO alert_incidents(id,identity,alert_task_id,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run('episode','identity','a',JSON.stringify({state,status,resolvedAt,firstCollectionRunId:'linked',lastCollectionRunId:'linked'}));
+ write('pending','recovered',null);expect(previewRetention(store,policy).runs).toBe(0);
+ write('resolved','recovered','2025-01-01T00:00:00Z');expect(previewRetention(store,policy).runs).toBe(0);
+ write('resolved','active','2021-01-01T00:00:00Z');expect(previewRetention(store,policy).runs).toBe(0);
+ write('resolved','recovered','2021-01-01T00:00:00Z');expect(cleanupRetention(store,policy).runs).toBe(1);
+});
+
+it('keeps recent recovery evidence even when the incident was manually resolved long ago',()=>{
+ const {store,batch}=fixture();batch('recovery',{matched:true,state:'resolved',resolvedAt:'2021-01-01T00:00:00Z'});
+ store.db.prepare("UPDATE alerts SET payload=json_set(payload,'$.incidentId','episode','$.event','recovered','$.createdAt','2023-06-01T00:00:00Z') WHERE run_id='recovery'").run();
+ store.db.prepare("UPDATE alert_runs SET payload=json_set(payload,'$.matched',0) WHERE collection_run_id='recovery'").run();
+ store.db.prepare('INSERT INTO alert_incidents(id,identity,alert_task_id,payload) VALUES(?,?,?,?)').run('episode','identity','a',JSON.stringify({state:'resolved',status:'recovered',resolvedAt:'2021-01-01T00:00:00Z',firstCollectionRunId:'recovery',lastCollectionRunId:'recovery'}));
+ expect(previewRetention(store,policy).runs).toBe(0);
+ expect(cleanupRetention(store,{historyBefore:'2025-01-01T00:00:00Z',alertBefore:'2024-01-01T00:00:00Z'}).runs).toBe(1);
 });

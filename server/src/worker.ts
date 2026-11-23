@@ -8,14 +8,16 @@ const now = () => new Date().toISOString();
 
 /** Collects prices only. Alert dispatch happens after the collection report is committed. */
 export class Worker {
-  private active: AbortController | null = null;
-  private activeId: string | null = null;
+  private active = new Map<string, {shopId:string;controller:AbortController}>();
+  private jobs = new Map<string, Promise<void>>();
   private draining: Promise<void> | null = null;
   private closed = false;
 
   constructor(private store: Store, private collector: Collector,
     private onCompleted?: (run: RunRecord) => void | Promise<void>,
-    private report?: DiagnosticReporter) {}
+    private report?: DiagnosticReporter, private concurrency = 1) {
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error('采集并发数必须是 1–4 的整数');
+  }
 
   recover(): void {
     for (const run of this.store.operationalRuns(['running', 'queued'])) {
@@ -49,7 +51,7 @@ export class Worker {
       processed: 0, failed: 0, rows: 0, checked: 0, excluded: 0, matched: 0, unknown: 0,
       message: '等待采集', createdAt: now(), startedAt: null, finishedAt: null, parentRunId: null,
       failedProductIds: [], notificationStatus: 'disabled', taskSnapshot: task ? structuredClone(task) : null,
-      alertTaskSnapshots: scheduled ? structuredClone(this.store.listAlertTasks().filter(t => t.collectionTaskId === taskId && t.enabled)) : [],
+      alertTaskSnapshots: scheduled ? structuredClone(this.store.listAlertTasks().filter(t => t.collectionTaskId === taskId && t.enabled).map(t => ({...t,notificationPolicy:t.notificationPolicy??{cooldownHours:24,notifyRecovery:false}}))) : [],
     };
     this.store.saveRun(run); this.kick(); return run;
   }
@@ -57,7 +59,7 @@ export class Worker {
   stop(id: string): RunRecord {
     const run = this.requireRun(id);
     if (!['running', 'queued', 'auth_required', 'recoverable'].includes(run.status)) throw new HttpError(400, '该采集不能停止');
-    if (this.activeId === id) this.active?.abort();
+    this.active.get(id)?.controller.abort();
     run.status = 'stopped'; run.message = '已停止，可继续'; this.store.saveRun(run); return run;
   }
 
@@ -65,7 +67,7 @@ export class Worker {
     const run = this.requireRun(id);
     if (!['stopped', 'recoverable', 'auth_required'].includes(run.status)) throw new HttpError(400, '该采集不能继续，请重新运行或重试失败项');
     this.requireValidShop(run.shopId);
-    if (this.activeId === id) throw new HttpError(400, '正在结束请求，请稍后继续');
+    if (this.active.has(id)) throw new HttpError(400, '正在结束请求，请稍后继续');
     // Resume preserves the original provenance and frozen alert configuration.
     run.status = 'queued'; run.message = '等待继续'; run.finishedAt = null;
     this.store.saveRun(run); this.kick(); return run;
@@ -88,8 +90,8 @@ export class Worker {
     this.store.saveRun(run); this.kick(); return run;
   }
 
-  async whenIdle(): Promise<void> {while (this.draining) await this.draining;}
-  async close(): Promise<void> {this.closed = true; this.active?.abort(); await this.whenIdle();}
+  async whenIdle(): Promise<void> {while (this.draining || this.jobs.size) await Promise.all([this.draining, ...this.jobs.values()]);}
+  async close(): Promise<void> {this.closed = true; for (const item of this.active.values()) item.controller.abort(); await this.whenIdle();}
   private requireRun(id: string): RunRecord {const run = this.store.getRun(id); if (!run) throw new HttpError(400, '采集记录不存在'); return run;}
   private requireValidShop(id: string): void {
     const shop = this.store.getShop(id);
@@ -99,15 +101,20 @@ export class Worker {
     if (this.closed || this.draining) return;
     this.draining = Promise.resolve().then(() => this.drain()).finally(() => {
       this.draining = null;
-      if (!this.closed && this.store.operationalRuns(['queued']).length) this.kick();
+      if (!this.closed && this.jobs.size < this.concurrency) {
+        const shops = new Set([...this.active.values()].map(item => item.shopId));
+        if (this.store.operationalRuns(['queued']).some(run => !shops.has(run.shopId))) this.kick();
+      }
     });
   }
-  private async drain(): Promise<void> {
-    while (!this.closed) {
-      const run = this.store.operationalRuns(['queued'])[0];
-      if (!run) break;
-      try {await this.execute(run);}
-      catch {
+  private drain(): void {
+    if (this.closed) return;
+    const shops = new Set([...this.active.values()].map(item => item.shopId));
+    for (const run of this.store.operationalRuns(['queued'])) {
+      if (this.jobs.size >= this.concurrency) break;
+      if (shops.has(run.shopId)) continue;
+      shops.add(run.shopId);
+      const job = this.execute(run).catch(() => {
         this.report?.('collection_failed', {runId:run.id});
         const current = this.store.getRun(run.id);
         if (current && !current.finishedAt) {
@@ -115,13 +122,15 @@ export class Worker {
           if (current.trigger === 'scheduled') current.alertDispatchStatus = 'skipped';
           this.store.saveRun(current);
         }
-        this.active = null; this.activeId = null;
-      }
+      }).finally(() => {
+        this.active.delete(run.id); this.jobs.delete(run.id); this.kick();
+      });
+      this.jobs.set(run.id, job);
     }
   }
 
   private async execute(run: RunRecord): Promise<void> {
-    const controller = new AbortController(); this.active = controller; this.activeId = run.id;
+    const controller = new AbortController(); this.active.set(run.id, {shopId:run.shopId, controller});
     run.status = 'running'; run.startedAt ??= now(); run.message = '正在读取商品'; this.store.saveRun(run);
     const priorRows = this.store.getRunPrices(run.id), productStates = new Map<string, boolean>();
     run.rows = priorRows.length;
@@ -175,7 +184,7 @@ export class Worker {
     } finally {
       run.failedProductIds = [...failures]; run.failed = failures.size; run.processed = attempted.size;
       run.rows = this.store.countRunPrices(run.id);
-      this.store.saveRun(run); this.active = null; this.activeId = null;
+      this.store.saveRun(run);
     }
     if (run.trigger === 'scheduled' && run.finishedAt && ['success', 'partial'].includes(run.status) && this.onCompleted) {
       // Failure here leaves a durable pending dispatch; startup recovery can safely retry it.

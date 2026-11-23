@@ -6,6 +6,8 @@ import {queryStore,queryAllStore,registerQueryFunctions} from './query.js';
 import {moneyCents,formatDiscount,rowKey} from './domain.js';
 import {migrateCollectionAlerts} from './migrations.js';
 import {COLLECTION_SUBMISSION_TTL_MS} from './collection-submissions.js';
+import {initializeIncidents,supersedeTaskIncidents} from './incidents.js';
+import {unfinishedRetryParentGuard} from './retention.js';
 import type {Run,RunStatus,CollectionTask,AlertTask,AlertRun,Shop,VerifiedAccount,ProductCollection,PriceRow,Alert,QueryInput,QueryResult,ProductRow,Overview} from '../../shared/contracts.js';
 // Serialize integer cents without routing through floating-point division.
 function moneyText(cents:number|null):string|null{if(cents===null)return null;const integer=BigInt(cents),absolute=integer<0n?-integer:integer;return `${integer<0n?'-':''}${absolute/100n}.${String(absolute%100n).padStart(2,'0')}`;}
@@ -31,6 +33,7 @@ export class Store {
    CREATE TABLE IF NOT EXISTS queries(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
   `);
   migrateCollectionAlerts(this.db);
+  initializeIncidents(this.db);
   this.db.exec('CREATE TABLE IF NOT EXISTS metadata(revision INTEGER NOT NULL); INSERT INTO metadata SELECT 0 WHERE NOT EXISTS(SELECT 1 FROM metadata)');
   for(const table of ['latest','prices','annotations','tasks','alert_tasks'])for(const action of ['INSERT','UPDATE','DELETE'])this.db.exec(`CREATE TRIGGER IF NOT EXISTS revision_${table}_${action} AFTER ${action} ON ${table} BEGIN UPDATE metadata SET revision=revision+1; END`);
   registerQueryFunctions(this.db);
@@ -58,17 +61,20 @@ export class Store {
  }
  getTask(id:string):CollectionTask|undefined{return this.readOne<CollectionTask>('SELECT payload FROM tasks WHERE id=? AND deleted=0',id);}
  listTasks():CollectionTask[]{return this.readMany<CollectionTask>('SELECT payload FROM tasks WHERE deleted=0 ORDER BY id');}
- deleteTask(id:string):void{this.transaction(()=>{this.db.prepare('UPDATE tasks SET deleted=1 WHERE id=?').run(id);this.db.prepare('UPDATE alert_tasks SET deleted=1 WHERE collection_task_id=?').run(id);});}
+ deleteTask(id:string):void{this.transaction(()=>{for(const row of this.db.prepare('SELECT id FROM alert_tasks WHERE collection_task_id=?').all(id))supersedeTaskIncidents(this.db,String(row.id));this.db.prepare('UPDATE tasks SET deleted=1 WHERE id=?').run(id);this.db.prepare('UPDATE alert_tasks SET deleted=1 WHERE collection_task_id=?').run(id);});}
  saveAlertTask(task:AlertTask):void{
   const collection=this.getTask(task.collectionTaskId);
   if(!collection||collection.shopId!==task.shopId)throw Error('预警任务与采集任务店铺不匹配');
   const old=this.readOne<AlertTask>('SELECT payload FROM alert_tasks WHERE id=?',task.id);
   if(old&&(old.collectionTaskId!==task.collectionTaskId||old.shopId!==task.shopId))throw Error('预警任务归属不可更改');
-  this.db.prepare('INSERT INTO alert_tasks(id,collection_task_id,shop_id,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(task.id,task.collectionTaskId,task.shopId,JSON.stringify(task));
+  this.transaction(()=>{
+   this.db.prepare('INSERT INTO alert_tasks(id,collection_task_id,shop_id,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload').run(task.id,task.collectionTaskId,task.shopId,JSON.stringify(task));
+   supersedeTaskIncidents(this.db,task.id,task.rules);
+  });
  }
  getAlertTask(id:string):AlertTask|undefined{return this.readOne<AlertTask>('SELECT payload FROM alert_tasks WHERE id=? AND deleted=0',id);}
  listAlertTasks():AlertTask[]{return this.readMany<AlertTask>('SELECT payload FROM alert_tasks WHERE deleted=0 ORDER BY id');}
- deleteAlertTask(id:string):void{this.db.prepare('UPDATE alert_tasks SET deleted=1 WHERE id=?').run(id);}
+ deleteAlertTask(id:string):void{this.transaction(()=>{supersedeTaskIncidents(this.db,id);this.db.prepare('UPDATE alert_tasks SET deleted=1 WHERE id=?').run(id);});}
  saveRun(run:RunRecord):void{
   if(!this.getShop(run.shopId))throw Error('店铺不存在');
   const task=run.taskId?this.readOne<CollectionTask>('SELECT payload FROM tasks WHERE id=?',run.taskId):undefined;
@@ -176,8 +182,9 @@ export class Store {
   if(!this.db.prepare('SELECT 1 FROM prices WHERE run_id=? AND shop_id=? AND product_id=? AND sku_id=?').get(alert.runId,alert.shopId,alert.productId,alert.skuId))throw Error('预警价格证据不存在');
   this.db.prepare('INSERT OR IGNORE INTO alerts VALUES(?,?,?,?,?,?,?)').run(alert.id,alert.runId,alert.shopId,alert.productId,alert.skuId,JSON.stringify(alert),alert.alertRunId||null);
  }
- listAlerts(filters:{state?:string;shopId?:string;runId?:string;alertRunId?:string}={}):Alert[]{
+ listAlerts(filters:{state?:string;shopId?:string;runId?:string;alertRunId?:string;legacyOnly?:boolean}={}):Alert[]{
   const conditions:string[]=[],args:string[]=[];
+  if(filters.legacyOnly)conditions.push("json_extract(payload,'$.incidentId') IS NULL");
   for(const [key,column] of [['state',"json_extract(payload,'$.state')"],['shopId','shop_id'],['runId','run_id'],['alertRunId','alert_run_id']] as const)if(filters[key]){conditions.push(`${column}=?`);args.push(filters[key]!);}
   return this.readMany<Alert>(`SELECT payload FROM alerts ${conditions.length?'WHERE '+conditions.join(' AND '):''} ORDER BY json_extract(payload,'$.createdAt') DESC,id DESC LIMIT 1000`,...args);
  }
@@ -185,7 +192,7 @@ export class Store {
  updateAlert(id:string,patch:Partial<Pick<Alert,'state'|'note'>>):Alert{
   if(Object.keys(patch).some(key=>!['state','note'].includes(key)))throw Error('只允许更新预警状态和备注');
   if(patch.state&&!['pending','confirmed','resolved'].includes(patch.state))throw Error('无效预警状态');
-  const old=this.getAlert(id);if(!old)throw Error('预警不存在');const alert={...old,...patch};
+  const old=this.getAlert(id);if(!old)throw Error('预警不存在');if(old.incidentId)throw Error('请在异常事件中更新处理状态，检查证据不可改写');const alert={...old,...patch};
   if(patch.state==='resolved'&&old.state!=='resolved')alert.resolvedAt=new Date().toISOString();
   else if(patch.state&&patch.state!=='resolved')delete alert.resolvedAt;
   this.db.prepare('UPDATE alerts SET payload=? WHERE id=?').run(JSON.stringify(alert),id);return alert;
@@ -212,7 +219,7 @@ export class Store {
    const hasReceipts=!!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='collection_submissions' AND type='table'").get();
    const protectedReceipts=hasReceipts?' AND id NOT IN(SELECT run_id FROM collection_submissions WHERE submitted_at>?)':'';
    const args=hasReceipts?[before,Date.now()-COLLECTION_SUBMISSION_TTL_MS]:[before];
-   const eligible=`SELECT id FROM runs WHERE json_extract(payload,'$.finishedAt') IS NOT NULL AND julianday(json_extract(payload,'$.finishedAt'))<julianday(?) AND coalesce(json_extract(payload,'$.alertDispatchStatus'),'not_applicable')!='pending' AND id NOT IN(SELECT run_id FROM alerts) AND id NOT IN(SELECT collection_run_id FROM alert_runs)${protectedReceipts}`;
+   const eligible=`SELECT id FROM runs r WHERE json_extract(payload,'$.finishedAt') IS NOT NULL AND julianday(json_extract(payload,'$.finishedAt'))<julianday(?) AND coalesce(json_extract(payload,'$.alertDispatchStatus'),'not_applicable')!='pending' AND id NOT IN(SELECT run_id FROM alerts) AND id NOT IN(SELECT collection_run_id FROM alert_runs)${protectedReceipts} ${unfinishedRetryParentGuard('r')}`;
    const prices=this.db.prepare(`DELETE FROM prices WHERE run_id IN(${eligible})`).run(...args);
    const runs=this.db.prepare(`DELETE FROM runs WHERE id IN(${eligible}) AND id NOT IN(SELECT run_id FROM latest)`).run(...args);
    return Number(prices.changes)+Number(runs.changes);
@@ -220,7 +227,7 @@ export class Store {
  }
  overview():Overview{
   const scalar=(sql:string)=>Number(this.db.prepare(sql).get()?.n||0);
-  return {shops:scalar('SELECT count(*) n FROM shops'),tasks:scalar('SELECT count(*) n FROM tasks WHERE deleted=0'),alertTasks:scalar('SELECT count(*) n FROM alert_tasks WHERE deleted=0'),products:scalar('SELECT count(*) n FROM(SELECT 1 FROM latest GROUP BY shop_id,product_id)'),skus:scalar('SELECT count(*) n FROM latest'),pendingAlerts:scalar("SELECT count(*) n FROM alerts WHERE json_extract(payload,'$.state')='pending'"),running:scalar("SELECT count(*) n FROM runs WHERE json_extract(payload,'$.status') IN('queued','running')"),failedRows:scalar("SELECT count(*) n FROM latest WHERE json_extract(payload,'$.stale')=1 OR json_extract(payload,'$.status')!='ok'"),recentRuns:this.listRuns().slice(0,10).map(({taskSnapshot:_,alertTaskSnapshots:__,...run})=>run)};
+  return {shops:scalar('SELECT count(*) n FROM shops'),tasks:scalar('SELECT count(*) n FROM tasks WHERE deleted=0'),alertTasks:scalar('SELECT count(*) n FROM alert_tasks WHERE deleted=0'),products:scalar('SELECT count(*) n FROM(SELECT 1 FROM latest GROUP BY shop_id,product_id)'),skus:scalar('SELECT count(*) n FROM latest'),pendingAlerts:scalar("SELECT (SELECT count(*) FROM alert_incidents WHERE json_extract(payload,'$.state')='pending') + (SELECT count(*) FROM alerts WHERE json_extract(payload,'$.state')='pending' AND json_extract(payload,'$.incidentId') IS NULL) n"),running:scalar("SELECT count(*) n FROM runs WHERE json_extract(payload,'$.status') IN('queued','running')"),failedRows:scalar("SELECT count(*) n FROM latest WHERE json_extract(payload,'$.stale')=1 OR json_extract(payload,'$.status')!='ok'"),recentRuns:this.listRuns().slice(0,10).map(({taskSnapshot:_,alertTaskSnapshots:__,...run})=>run)};
  }
  backup(destination:string):Promise<void>{return backupDatabase(this.db,destination);}
  query(input:QueryInput):QueryResult{return queryStore(this,input);}

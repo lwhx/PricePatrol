@@ -144,7 +144,7 @@ jobs:
             if ((await setup({setupToken:token})).status !== 409) throw new Error("Setup token was accepted twice");
             const cookie = initialized.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
             const operations = await fetch("http://127.0.0.1:3000/api/operations", {headers:{cookie}}).then(response => response.json());
-            if (operations.build.sha !== EXPECTED_BUILD_SHA || operations.build.time !== EXPECTED_BUILD_TIME) throw new Error("Runtime build identity missing");
+            if (operations.build.sha !== EXPECTED_BUILD_SHA || operations.build.time !== new Date(EXPECTED_BUILD_TIME).toISOString()) throw new Error("Runtime build identity missing");
             const maintenance = await fetch("http://127.0.0.1:3000/api/maintenance/settings", {headers:{cookie}}).then(response => response.json());
             if (maintenance.cleanupEnabled !== false || maintenance.backupsEnabled !== true || maintenance.backupKeep !== 14) throw new Error("Maintenance defaults changed");
           '

@@ -12,7 +12,8 @@ const store=new Store(join(dataDir,'monitor.sqlite'),encryptionKey);
 const setupToken=await prepareBootstrap(store,dataDir);
 const port=Number(process.env.PORT||3000);const host=process.env.HOST||'127.0.0.1';
 const allowedOrigins=(process.env.ALLOWED_ORIGINS||'http://localhost:5173,http://127.0.0.1:5173').split(',').filter(Boolean);
-const {app,worker,alertWorker,scheduler,maintenance}=await buildApp({store,collector:createCollector(),dataDir,encryptionKey,allowedOrigins,setupToken});worker.recover();alertWorker.recover();scheduler.start();maintenance.start();
+const collectionConcurrency=Number(process.env.COLLECTION_CONCURRENCY||1);
+const {app,worker,alertWorker,scheduler,maintenance}=await buildApp({store,collector:createCollector(),dataDir,encryptionKey,allowedOrigins,setupToken,collectionConcurrency});worker.recover();alertWorker.recover();scheduler.start();maintenance.start();
 await app.listen({host,port});console.log(`电商价格监控已启动：http://${host}:${port}`);
 let stopping=false;async function close(){if(stopping)return;stopping=true;await app.close();store.close();process.exit(0);}
 process.on('SIGINT',()=>void close());process.on('SIGTERM',()=>void close());

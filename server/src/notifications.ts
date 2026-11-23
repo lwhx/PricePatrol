@@ -1,5 +1,6 @@
 import type {Alert,NotificationMessage,NotificationSettings} from '../../shared/contracts.js';
 import type {Store,RunRecord,AlertRunRecord} from './database.js';
+import {reserveFrozenSubmission,releaseUnsentReservations} from './incidents.js';
 import {Vault} from './security.js';
 import {sendServerChan} from './integrations/serverchan.js';
 import {HttpError,requireValue,type ApiContext} from './api-context.js';
@@ -8,10 +9,12 @@ export function notificationSettings(store:Store):NotificationSettings{return {e
 function getKey(store:Store,vault:Vault):string{const sealed=store.getConfig<string>('notification.key','');if(!sealed)throw new HttpError(400,'请先配置Server酱SendKey');try{return vault.open<string>(sealed);}catch{throw new HttpError(400,'通知密钥无法读取，请重新配置');}}
 function report(run:AlertRunRecord,source:RunRecord,alerts:Alert[]):NotificationMessage{
   const safe=(value:string)=>value.replace(/[|\r\n]/g,' ');
-  const rows=alerts.slice(0,60).map(a=>`| ${a.productId} | ${safe(a.title).slice(0,60)} | ${safe(a.specs).slice(0,70)} | ${a.backendPrice??'缺失'} | ${a.after??'缺失'} | ${a.discount??'未知'} |`).join('\n');
+  const events={first:'首次',continuing:'持续',worsened:'恶化',recovered:'恢复'};
+  const rows=alerts.slice(0,60).map(a=>`| ${a.event?events[a.event]:'命中'} | ${a.productId} | ${safe(a.title).slice(0,60)} | ${safe(a.specs).slice(0,70)} | ${a.backendPrice??'缺失'} | ${a.after??'缺失'} | ${a.discount??'未知'} |`).join('\n');
+  const count=run.notificationCount??run.matched;
   const coverage=source.status==='partial'||run.status==='partial'?'覆盖不完整：只检查本批已采集的数据；未采集或无法判断的 SKU 不代表价格正常。':'仅依据本批采集价格检查；无法判断的 SKU 不代表价格正常。';
-  return {title:`${run.shopName}：${run.matched}个SKU触发价格预警`,short:`${run.taskName}，检查${run.checked}，排除${run.excluded}，无法判断${run.unknown}`,
-    description:`### ${safe(run.taskName)}\n\n店铺：${safe(run.shopName)}\n\n预警状态：${run.status}；规则版本：${run.ruleVersion}；检查 SKU：${run.checked}；排除 SKU：${run.excluded}；无法判断 SKU：${run.unknown}。\n\n采集状态：${source.status}；完成商品：${source.processed}/${source.expected}；失败商品：${source.failed}。${coverage}\n\n| 商品ID | 标题 | 规格 | 后台标价 | 页面优惠后 | 折扣 |\n|---|---|---|---|---|---|\n${rows}\n\n${run.matched>60||alerts.length>60?'仅展示前60条，完整结果请在预警记录中查看。':''}\n采集批次：${run.collectionRunId}\n预警执行：${run.id}\n完成时间：${run.finishedAt}`};
+  return {title:run.notificationCount===undefined?`${run.shopName}：${run.matched}个SKU触发价格预警`:`${run.shopName}：${count}项价格预警动态`,short:`${run.taskName}，检查${run.checked}，排除${run.excluded}，无法判断${run.unknown}`,
+    description:`### ${safe(run.taskName)}\n\n店铺：${safe(run.shopName)}\n\n预警状态：${run.status}；规则版本：${run.ruleVersion}；检查 SKU：${run.checked}；排除 SKU：${run.excluded}；无法判断 SKU：${run.unknown}。\n\n采集状态：${source.status}；完成商品：${source.processed}/${source.expected}；失败商品：${source.failed}。${coverage}\n\n| 动态 | 商品ID | 标题 | 规格 | 后台标价 | 页面优惠后 | 折扣 |\n|---|---|---|---|---|---|---|\n${rows}\n\n${count>60||alerts.length>60?'仅展示前60条，完整结果请在预警记录中查看。':''}\n采集批次：${run.collectionRunId}\n预警执行：${run.id}\n完成时间：${run.finishedAt}`};
 }
 export async function notifyAlertRun(store:Store,vault:Vault,input:AlertRunRecord,force=false):Promise<void>{
   let run=requireValue(store.getAlertRun(input.id),'预警执行不存在');
@@ -24,13 +27,25 @@ export async function notifyAlertRun(store:Store,vault:Vault,input:AlertRunRecor
   // Delivery failures, including uncertain in-flight deliveries recovered after restart, need an explicit retry.
   if(run.notificationStatus==='failed'&&!force)return;
   const saveStatus=(status:string)=>{run={...requireValue(store.getAlertRun(run.id),'预警执行不存在'),notificationStatus:status};store.saveAlertRun(run);};
-  if(!run.taskSnapshot.notify){saveStatus('disabled');if(force)throw new HttpError(400,'该批次冻结的预警任务未启用通知');return;}
+  const unsent=(status:'disabled'|'not_configured')=>{
+    // An earlier uncertain submission remains uncertain even when its explicit retry has no usable channel.
+    if(run.notificationStatus==='failed')return;
+    store.transaction(()=>{saveStatus(status);releaseUnsentReservations(store,run);});
+  };
+  if(!run.taskSnapshot.notify){unsent('disabled');if(force)throw new HttpError(400,'该批次冻结的预警任务未启用通知');return;}
+  if(run.notificationCandidateIds?.length===0){saveStatus('skipped');return;}
   const config=notificationSettings(store);
-  if(!config.enabled){saveStatus('disabled');if(force)throw new HttpError(400,'通知尚未启用');return;}
-  if(!config.hasSendKey){saveStatus('not_configured');if(force)throw new HttpError(400,'请先配置Server酱SendKey');return;}
-  const alerts=store.listAlerts({alertRunId:run.id});
+  if(!config.enabled){unsent('disabled');if(force)throw new HttpError(400,'通知尚未启用');return;}
+  if(!config.hasSendKey){unsent('not_configured');if(force)throw new HttpError(400,'请先配置Server酱SendKey');return;}
+  // Pre-upgrade finished reports keep their original delivery contract. New reports use only their frozen subset.
+  const alerts=run.notificationCandidateIds===undefined?store.listAlerts({alertRunId:run.id}):
+    run.notificationCandidateIds.slice(0,60).map(id=>{
+      const alert=store.getAlert(id);
+      if(!alert||alert.alertRunId!==run.id)throw Error('冻结的预警通知证据不可用');
+      return alert;
+    });
   if(!alerts.length){saveStatus('skipped');return;}
-  saveStatus('sending');
+  store.transaction(()=>{saveStatus('sending');reserveFrozenSubmission(store,run);});
   try{
     const result=await sendServerChan(getKey(store,vault),report(run,source,alerts));
     if(!result.accepted)throw Error('通知未被接受');

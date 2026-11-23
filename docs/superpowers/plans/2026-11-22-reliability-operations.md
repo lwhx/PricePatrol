@@ -30,72 +30,74 @@
 
 **Files:** collector/*.ts, routes-accounts.ts, regression tests. Contracts addition owned by controller.
 **Interfaces:** Produces `ProductCollection.skuSetComplete`; typed verification classification. Consumes existing Collector interface.
-- [ ] Write fixtures for transient verification, stale credential race, unrelated invalid SKU, partial product isolation, Max-Age and bounded identity discovery.
-- [ ] Run targeted tests to establish failures.
-- [ ] Implement errors, isolation, authoritative SKU marker and bounded probes; no relaxation of ownership validation.
-- [ ] Run collector/account regressions and review diff.
+- [x] Write fixtures for transient verification, stale credential race, unrelated invalid SKU, partial product isolation, Max-Age and bounded identity discovery.
+- [x] Run targeted tests to establish failures.
+- [x] Implement errors, isolation, authoritative SKU marker and bounded probes; no relaxation of ownership validation.
+- [x] Run collector/account regressions and review diff.
 
 ### Task 2: Data accuracy and UI operations
 
 **Files:** database.ts, export.ts, worker.ts (controller); routes-tasks.ts, new collection-submissions.ts, web BatchAction/TaskEdit/PricesPage and tests (UI agent).
 **Interfaces:** `saveProduct(...):number` returns net newly inserted batch rows; `countRunPrices(runId):number`. POST `/tasks/:id/products` appends `{productIds}` atomically. PATCH task optionally accepts `expectedVersion`. Collection submission helper receives Store, Worker, shop ID, product IDs and optional idempotency key.
-- [ ] Pin complete vs partial SKU reconciliation and aggregate export projection regressions.
-- [ ] Implement authoritative latest reconciliation, incremental counts and export field projection.
-- [ ] Implement atomic append, version conflicts, persisted bounded idempotency records and per-shop batch retry UI.
-- [ ] Convert restored timestamps to datetime-local and display active filter summary.
-- [ ] Run related server/UI tests and review.
+- [x] Pin complete vs partial SKU reconciliation and aggregate export projection regressions.
+- [x] Implement authoritative latest reconciliation, incremental counts and export field projection.
+- [x] Implement atomic append, version conflicts, persisted bounded idempotency records and per-shop batch retry UI.
+- [x] Convert restored timestamps to datetime-local and display active filter summary.
+- [x] Run related server/UI tests and review.
 
 ### Task 3: Production bootstrap protection and build identity
 
 **Files:** auth.ts, main.ts, app.ts wiring, new bootstrap/build-info modules, Dockerfile, both Compose/env examples, container.yml, AuthPage and tests.
 **Interfaces:** AppOptions adds bootstrap token; auth status adds `setupTokenRequired`. Bootstrap file persists under DATA_DIR, or ADMIN_PASSWORD preinitializes. Build info is available to authenticated settings/health details.
-- [ ] Prove fresh protected setup rejects absent/wrong token, accepts once, and existing admins remain compatible.
-- [ ] Implement initialization, Compose passthrough, auth token field and documented retrieval.
-- [ ] Bake BUILD_SHA/BUILD_TIME in image and test safe local defaults.
-- [ ] Run auth/deploy regressions; integrate and commit stage 1 after review.
+- [x] Prove fresh protected setup rejects absent/wrong token, accepts once, and existing admins remain compatible.
+- [x] Implement initialization, Compose passthrough, auth token field and documented retrieval.
+- [x] Bake BUILD_SHA/BUILD_TIME in image and test safe local defaults.
+- [x] Run auth/deploy regressions; integrate and commit stage 1 after review.
 
 ### Task 4: Maintenance and retention
 
 **Files:** new maintenance/retention/backup modules and worker, database integration, settings/data routes, SettingsPage, regression tests.
 **Interfaces:** authenticated maintenance settings/status/preview/run APIs; service start/close hooks. Defaults and retention protection exactly as spec.
-- [ ] Write retention tests for zero-hit, resolved, unresolved, active/latest and pending delivery evidence.
-- [ ] Implement transactional preview/cleanup and daily configured scheduler.
-- [ ] Implement verified background backups, owned-file rotation and optional configured copy destination.
-- [ ] Add settings UI, preview confirmations, error/status display, volume configuration and restore documentation.
-- [ ] Run targeted tests including interrupted backup/restart; review maintenance independently.
+- [x] Write retention tests for zero-hit, resolved, unresolved, active/latest and pending delivery evidence.
+- [x] Implement transactional preview/cleanup and daily configured scheduler.
+- [x] Implement verified background backups, owned-file rotation and optional configured copy destination.
+- [x] Add settings UI, preview confirmations, error/status display, volume configuration and restore documentation.
+- [x] Run targeted tests including interrupted backup/restart; review maintenance independently.
 
 ### Task 5: Business health and diagnostics
 
 **Files:** new operations module, scheduler.ts, app.ts, worker.ts, health routes, OverviewPage/SettingsPage, tests.
 **Interfaces:** durable schedule events, authenticated operations overview, structured logger without sensitive payloads; real build/schema identity.
-- [ ] Test invalid account schedule skip record, last success/data age and unknown-error 500.
-- [ ] Implement metrics and bounded schedule event storage with safe logs and explicit business errors.
-- [ ] Expose usable status UI and last backup/cleanup results; review and commit stage 2.
+- [x] Test invalid account schedule skip record, last success/data age and unknown-error 500.
+- [x] Implement metrics and bounded schedule event storage with safe logs and explicit business errors.
+- [x] Expose usable status UI and last backup/cleanup results; review and commit stage 2.
 
 ### Task 6: Incident lifecycle and notification reduction
 
 **Files:** new incidents module, alert-worker.ts, notifications.ts, shared contracts, validation, alert task UI/records, tests.
 **Interfaces:** optional task notification policy; persistent incident state and immutable evaluation summary including notification candidate IDs. Legacy tasks receive safe policy defaults.
-- [ ] Test first/continuing/worse/recovery/unknown/manual/rule-change/restart/idempotency cases.
-- [ ] Implement atomic incident updates alongside evaluation evidence and frozen notification candidates.
-- [ ] Send first/worsening/cooldown reminders and optional recovery; retain every evaluation.
-- [ ] Add task controls and lifecycle labels; review independently.
+- [x] Test first/continuing/worse/recovery/unknown/manual/rule-change/restart/idempotency cases.
+- [x] Implement atomic incident updates alongside evaluation evidence and frozen notification candidates.
+- [x] Send first/worsening/cooldown reminders and optional recovery; retain every evaluation.
+- [x] Add task controls and lifecycle labels.
+- [ ] Complete independent scoped re-review of lifecycle fixes.
 
 ### Task 7: Performance and export jobs
 
 **Files:** query.ts, new export jobs/worker/files modules, export routes, CopyDialog, worker.ts, tests.
 **Interfaces:** asynchronous file-export creation/status/download, bounded preview and metadata, authenticated expiry-safe file lookup. Existing small copy API remains compatible.
-- [ ] Measure baseline count/query repetition with fixtures; optimize repeated operations with equal results.
-- [ ] Add file-backed worker export jobs, format-equivalent streaming and bounded batch iteration.
-- [ ] Handle restart/expiry/failure and make UI poll/cancel or download without receiving full large content.
-- [ ] Add configurable cross-shop concurrency default 1 with shop exclusion and stop/recovery tests.
-- [ ] Run targeted regressions and review stage 3.
+- [x] Measure baseline count/query repetition with fixtures; optimize repeated operations with equal results.
+- [x] Add file-backed worker export jobs, format-equivalent streaming and bounded batch iteration.
+- [x] Handle restart/expiry/failure and make UI poll/cancel or download without receiving full large content.
+- [x] Add configurable cross-shop concurrency default 1 with shop exclusion and stop/recovery tests.
+- [x] Run targeted regressions, including export failure recovery and metadata-only download preflight.
+- [ ] Complete independent scoped re-review of export fixes.
 
 ### Task 8: Integration, release and documentation
 
 **Files:** README, API contracts, implementation report, CI as necessary.
-- [ ] Run `npm run check`, inspect targeted failures and fix concrete regressions.
+- [x] Run `npm run check`: 325 server tests and 69 UI tests passed, one optional local Chromium skip; typecheck and production frontend build passed.
 - [ ] Independent full-branch review of data retention, provenance, lifecycle, auth, exports and UI.
 - [ ] Publish feature branch/PR, wait for CI including real Chromium and Compose validation.
 - [ ] Merge/push with expected head, verify main workflow and multiarch images.
-- [ ] Record final implemented defaults, checks and host configuration requirements.
+- [x] Record implemented defaults, local checks and host configuration requirements in `docs/优化实施记录.md`; final release status is recorded by the PR and Actions run.

@@ -60,3 +60,13 @@ describe('SQL price queries',()=>{
   expect(s.query({search:"%' OR 1=1 --"}).total).toBe(0);expect(s.query({productIds:["' OR 1=1 --"]}).total).toBe(0);expect(()=>s.query({sort:'after); DROP TABLE shops;--'})).toThrow();expect(s.listShops()).toHaveLength(1);
  });
 });
+
+it('evaluates each candidate once for rows and all counts, including an empty requested page',()=>{
+ const s=fixture();
+ for(const id of ['100001','100002'])s.saveProduct('r1',{productId:id,title:'fixture',rows:[row(id,'a'),row(id,'b')]});
+ let evaluations=0;
+ s.db.function('rule_state',(_payload,_groups)=>{evaluations++;return 1;});
+ const result=s.query({view:'product',page:4,pageSize:1});
+ expect(result).toMatchObject({rows:[],total:2,productCount:2,skuCount:4});
+ expect(evaluations).toBe(4);
+});

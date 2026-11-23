@@ -1,4 +1,5 @@
 import type {Store, AlertRunRecord} from './database.js';
+import {beginObservations} from './incidents.js';
 import {evaluateRules, whitelistReason} from './domain.js';
 import type {DiagnosticReporter} from './diagnostics.js';
 
@@ -80,10 +81,14 @@ export class AlertWorker {
     this.store.transaction(() => {
       const source = this.store.getRun(run.collectionRunId)!;
       const task = run.taskSnapshot;
+      const sourceScope = source.scope === 'selected' ? new Set(source.productIds) : null;
+      const alertScope = task.scope === 'selected' ? new Set(task.productIds) : null;
       const rows = this.store.getRunPrices(source.id).filter(row =>
-        (source.scope !== 'selected' || source.productIds.includes(row.productId)) &&
-        (task.scope !== 'selected' || task.productIds.includes(row.productId)));
+        (!sourceScope || sourceScope.has(row.productId)) && (!alertScope || alertScope.has(row.productId)));
       run.rows = rows.length; run.checked = 0; run.excluded = 0; run.matched = 0; run.unknown = 0;
+      const observe = beginObservations(this.store, run, source);
+      run.lifecycle = { first: 0, continuing: 0, worsened: 0, recovered: 0 };
+      run.notificationCandidateIds = [];
       for (const row of rows) {
         if (whitelistReason(row, task.whitelist)) {run.excluded++; continue;}
         // Price fields retain three-valued missing/stale semantics; status rules can
@@ -91,15 +96,22 @@ export class AlertWorker {
         const result = evaluateRules(row, task.rules);
         if (result.value === null) {run.unknown++; continue;}
         run.checked++;
-        if (!result.value) continue;
-        run.matched++;
+        if (result.value) run.matched++;
+        const observed = observe(row, result.value);
+        if (!observed) continue;
+        const {incident,event,notify} = observed;
+        run.lifecycle[event]++;
+        const id = `${run.id}:${row.id}`;
+        if (notify) run.notificationCandidateIds.push(id);
         this.store.saveAlert({
-          id: `${run.id}:${row.id}`, alertRunId: run.id, runId: source.id, taskId: task.id, ruleVersion: run.ruleVersion,
+          id, incidentId: incident.id, event, alertRunId: run.id, runId: source.id, taskId: task.id, ruleVersion: run.ruleVersion,
           shopId: run.shopId, shopName: run.shopName, productId: row.productId, skuId: row.skuId,
           title: row.title, specs: row.specs, backendPrice: row.backendPrice, before: row.before, after: row.after,
-          discount: row.discount, reasons: result.reasons, state: 'pending', note: '', createdAt: now(),
+          discount: row.discount, reasons: event === 'recovered' ? ['本次有效检查已不再命中冻结规则'] : result.reasons, state: incident.state, note: incident.note, resolvedAt: incident.resolvedAt, createdAt: now(),
         });
       }
+      run.notificationCount = run.notificationCandidateIds.length;
+      if (task.notify && !run.notificationCount) run.notificationStatus = 'skipped';
       run.status = source.status === 'partial' || run.unknown ? 'partial' : 'success'; run.finishedAt = now();
       run.message = run.status === 'partial' ? '预警检查完成；来源采集覆盖不完整或存在无法判断的数据' : '预警检查完成';
       this.store.saveAlertRun(run);
@@ -107,7 +119,7 @@ export class AlertWorker {
     this.queueNotification(run);
   }
   private queueNotification(run: AlertRunRecord): void {
-    if (!run.taskSnapshot.notify || !this.notify) return;
+    if (run.notificationStatus !== 'pending' || !run.taskSnapshot.notify || !this.notify) return;
     this.notificationQueue.add(run.id); this.kickNotifications();
   }
   private kickNotifications(): void {

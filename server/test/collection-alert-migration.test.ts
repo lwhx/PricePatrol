@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Store,type RunRecord} from '../src/database.js';
 import {AlertWorker} from '../src/alert-worker.js';
+import {getIncident,updateIncident} from '../src/incidents.js';
 import {migrateCollectionAlerts} from '../src/migrations.js';
 import {Vault} from '../src/security.js';
 import type {Alert,AlertTask,MonitorTask,PriceRow,Shop,VerifiedAccount} from '../../shared/contracts.js';
@@ -102,8 +103,11 @@ describe('collection and alert migration on existing SQLite files',()=>{
   expect(alerts).toHaveLength(2);expect(new Set(alerts.map(value=>value.taskId))).toEqual(new Set([first.id,second.id]));
   expect(store.listAlertRuns({collectionRunId:'new-source'})).toHaveLength(2);
   expect(alerts.every(value=>value.productId===price.productId&&value.skuId===price.skuId)).toBe(true);
-  store.updateAlert(alerts[0]!.id,{state:'resolved',note:'仅处理此规则'});
-  expect(store.getAlert(alerts[1]!.id)?.state).toBe('pending');
+  updateIncident(store,alerts[0]!.incidentId!,{state:'resolved',note:'仅处理此规则'});
+  expect(getIncident(store,alerts[0]!.incidentId!).state).toBe('resolved');
+  expect(getIncident(store,alerts[1]!.incidentId!).state).toBe('pending');
+  expect(store.getAlert(alerts[0]!.id)).toEqual(alerts[0]);
+  expect(store.getAlert(alerts[1]!.id)).toEqual(alerts[1]);
   expect(store.getAlert(legacyAlert.id)).toEqual(legacyAlert);
  });
 

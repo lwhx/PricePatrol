@@ -19,11 +19,12 @@ describe('frozen exports',()=>{
   let evaluated=0;s.db.function('rule_state',(payload,groups)=>{evaluated++;return Number(evaluateRules(JSON.parse(String(payload)),JSON.parse(String(groups))).value);});
   expect(buildExport(s,input({scope:'selected',selectedIds:['s1:1000001:99'],fields:['skuId']})).rowCount).toBe(1);expect(evaluated).toBe(1);
  });
- it('recommends downloads without truncating large results and bounds snapshot lifetime',()=>{
-  const s=fixture();s.saveProduct('r1',{productId:'1000001',title:'',rows:Array.from({length:20001},(_,i)=>row('1000001',String(i).padStart(6,'0')))});
-  const exported=buildExport(s,input({fields:['skuId'],header:false}));expect(exported.rowCount).toBe(20001);expect(exported.content.split('\n')).toHaveLength(20001);expect(exported.content.endsWith('020000')).toBe(true);expect(exported.downloadRecommended).toBe(true);
+ it('guards the bounded synchronous copy path and expires small copy snapshots',()=>{
+  const s=fixture();s.saveProduct('r1',{productId:'1000001',title:'',rows:Array.from({length:2001},(_,i)=>row('1000001',String(i).padStart(6,'0')))});
+  expect(()=>buildExport(s,input({fields:['skuId'],header:false}))).toThrow('文件导出任务');
   const small=fixture();small.saveProduct('r1',{productId:'1000001',title:'',rows:[row('1000001','000000')]});small.annotate('s1',['1000001'],[],'a'.repeat(5*1024*1024+1));
-  const huge=buildExport(small,input({scope:'selected',selectedIds:['s1:1000001:000000'],fields:['note'],header:false}));expect(huge.bytes).toBe(5*1024*1024+1);expect(huge.downloadRecommended).toBe(true);
+  expect(()=>buildExport(small,input({scope:'selected',selectedIds:['s1:1000001:000000'],fields:['note'],header:false}))).toThrow('文件导出任务');
+  expect(small.db.prepare("SELECT name FROM sqlite_master WHERE name='export_snapshots'").get()).toBeUndefined();
   const first=buildExport(s,input({scope:'selected',selectedIds:[],fields:['skuId']}));for(let i=0;i<32;i++)buildExport(s,input({scope:'selected',selectedIds:[],fields:['skuId']}));expect(getExport(s,first.token)).toBeUndefined();
   const last=buildExport(s,input({scope:'selected',selectedIds:[],fields:['skuId']}));const now=Date.now();const clock=vi.spyOn(Date,'now').mockReturnValue(now+16*60*1000);try{expect(getExport(s,last.token)).toBeUndefined();}finally{clock.mockRestore();}
  },30000);

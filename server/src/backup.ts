@@ -9,6 +9,7 @@ function snapshotWorker(source: string | null, target: string): Promise<void> {
     const worker = new Worker(new URL('./backup-worker.mjs', import.meta.url), {
       workerData: { source, target },
       execArgv: [],
+      env: {},
     });
     worker.once('error', reject);
     worker.once('exit', code => {
