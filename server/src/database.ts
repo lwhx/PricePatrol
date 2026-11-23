@@ -49,8 +49,11 @@ export class Store {
   if(credentials&&(credentials.sellerId!==shop.sellerId||credentials.platform!==shop.platform))throw Error('凭据与店铺不匹配');
   // Saving live credentials onto an archived (removed) row would silently resurrect the account.
   if(previous?.archivedAt&&!credentials&&previous.hasCookies)throw Error('店铺已移除，请重新导入核验后再启用');
-  const safe:Shop={id:shop.id,name:shop.name,sellerId:shop.sellerId,platform:shop.platform,enabled:shop.enabled,sessionStatus:shop.sessionStatus,lastVerifiedAt:shop.lastVerifiedAt,lastError:shop.lastError,createdAt:shop.createdAt,updatedAt:shop.updatedAt,hasCookies:!!credentials||!!previous?.hasCookies,...(shop.archivedAt!==undefined||previous?.archivedAt!==undefined?{archivedAt:shop.archivedAt??previous?.archivedAt??null}:{})};
-  this.db.prepare('INSERT INTO shops(id,payload,credentials,credential_version,archived_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,credentials=coalesce(excluded.credentials,shops.credentials),credential_version=shops.credential_version+excluded.credential_version,archived_at=coalesce(excluded.archived_at,shops.archived_at)').run(shop.id,JSON.stringify(safe),credentials?this.vault.seal(credentials):null,credentials?1:0,safe.archivedAt??null);
+  // An explicit null means "restore this account": null must overwrite the stored marker instead
+  // of falling back to it, otherwise a re-imported shop stays hidden from listShops() forever.
+  const archivedAt=shop.archivedAt===undefined?previous?.archivedAt??null:shop.archivedAt;
+  const safe:Shop={id:shop.id,name:shop.name,sellerId:shop.sellerId,platform:shop.platform,enabled:shop.enabled,sessionStatus:shop.sessionStatus,lastVerifiedAt:shop.lastVerifiedAt,lastError:shop.lastError,createdAt:shop.createdAt,updatedAt:shop.updatedAt,hasCookies:!!credentials||!!previous?.hasCookies,...(archivedAt===null&&previous?.archivedAt===undefined?{}:{archivedAt})};
+  this.db.prepare('INSERT INTO shops(id,payload,credentials,credential_version,archived_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,credentials=coalesce(excluded.credentials,shops.credentials),credential_version=shops.credential_version+excluded.credential_version,archived_at=excluded.archived_at').run(shop.id,JSON.stringify(safe),credentials?this.vault.seal(credentials):null,credentials?1:0,archivedAt);
  }
  getShop(id:string):Shop|undefined{return this.readOne<Shop>('SELECT payload FROM shops WHERE id=?',id);}
  listShops():Shop[]{return this.readMany<Shop>("SELECT payload FROM shops WHERE archived_at IS NULL ORDER BY id");}

@@ -75,6 +75,12 @@ it('aborts active collection, retires queued work and never auto-resumes old pla
   const version=store.getCredentialVersion(shop.id);
   const restored=await request('POST','/api/shops',{platform:'tmall',cookies:'unb=new-session'});
   expect(restored.statusCode).toBe(200);expect(restored.json().shop).toMatchObject({id:shop.id,enabled:true,hasCookies:true});expect(restored.json().shop.archivedAt).toBeFalsy();
+  // The returned object is built in memory; the account list is read back from the database,
+  // so the cleared archive marker must survive the round trip or the shop never reappears.
+  expect(store.listShops().map(s=>s.id)).toContain(shop.id);
+  expect(store.getShop(shop.id)?.archivedAt).toBeNull();
+  expect(store.db.prepare('SELECT archived_at FROM shops WHERE id=?').get(shop.id)?.archived_at).toBeNull();
+  expect((await request('GET','/api/shops')).json().shops.map((s:{id:string})=>s.id)).toContain(shop.id);
   expect(store.getCredentialVersion(shop.id)).toBeGreaterThan(version);
   new Scheduler(store,worker).tick(new Date('2026-11-24T01:00:00.000Z'));
  }finally{release.resolve();}
